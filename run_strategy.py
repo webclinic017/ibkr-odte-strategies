@@ -424,11 +424,67 @@ def close_positions(args):
                 action = "SELL" if quantity > 0 else "BUY"
                 qty = abs(quantity)
                 
-                order = MarketOrder(action, qty)
-                trade = ibkr.ib.placeOrder(contract, order)
-                ibkr.ib.sleep(1)  # Pequeña pausa
+                # Obtener el exchange apropiado para este contrato
+                exchange = contract.exchange
+                if not exchange or exchange == 'SMART':
+                    # Para futuros, necesitamos un exchange específico
+                    if contract.secType == 'FUT':
+                        # Intentar obtener primaryExchange o usar el exchange por defecto según el producto
+                        if hasattr(contract, 'primaryExchange') and contract.primaryExchange:
+                            exchange = contract.primaryExchange
+                        elif contract.symbol in ['ES', 'MES', 'NQ', 'MNQ', 'YM', 'MYM']:
+                            exchange = 'GLOBEX'  # Para futuros de índices CME
+                        elif contract.symbol in ['CL', 'GC', 'SI', 'HG']:
+                            exchange = 'NYMEX'  # Para futuros de commodities
+                        else:
+                            # Intentar obtenerlo desde los detalles del contrato
+                            try:
+                                details = ibkr.ib.reqContractDetails(contract)
+                                if details and details[0].marketName:
+                                    exchange = details[0].marketName
+                                else:
+                                    exchange = 'GLOBEX'  # Usar GLOBEX como fallback
+                            except:
+                                exchange = 'GLOBEX'  # Fallback si todo lo demás falla
                 
-                logger.info(f"Orden de cierre enviada para {contract.symbol}")
+                # Asegurarse de que el contrato tenga el exchange correcto
+                contract.exchange = exchange
+                
+                # Crear y enviar la orden
+                try:
+                    order = MarketOrder(action, qty)
+                    trade = ibkr.ib.placeOrder(contract, order)
+                    ibkr.ib.sleep(1)  # Pequeña pausa
+                    
+                    # Verificar estado de la orden
+                    order_status = trade.orderStatus.status if hasattr(trade, 'orderStatus') else 'Unknown'
+                    logger.info(f"Orden de cierre enviada para {contract.symbol} ({contract.secType}, exchange: {exchange}). Estado: {order_status}")
+                except Exception as order_e:
+                    logger.error(f"Error al enviar orden para {contract.symbol}: {order_e}")
+                    # Intentar con un enfoque alternativo si es un futuro
+                    if contract.secType == 'FUT':
+                        try:
+                            logger.info(f"Intentando cerrar futuro {contract.symbol} con método alternativo")
+                            # Crear un nuevo contrato con todos los detalles necesarios explícitamente
+                            from ib_insync import Future
+                            new_contract = Future(symbol=contract.symbol, 
+                                                 lastTradeDateOrContractMonth=contract.lastTradeDateOrContractMonth,
+                                                 exchange=exchange,
+                                                 currency=contract.currency,
+                                                 multiplier=contract.multiplier if hasattr(contract, 'multiplier') else None)
+                            
+                            # Calificar el contrato para asegurarnos de que esté completo
+                            ibkr.ib.qualifyContracts(new_contract)
+                            
+                            # Crear y enviar la orden con el contrato completo
+                            new_order = MarketOrder(action, qty)
+                            new_trade = ibkr.ib.placeOrder(new_contract, new_order)
+                            ibkr.ib.sleep(1)
+                            
+                            logger.info(f"Orden alternativa enviada para futuro {contract.symbol}")
+                        except Exception as alt_e:
+                            logger.error(f"También falló el método alternativo para {contract.symbol}: {alt_e}")
+                    
                 
             logger.info("Todas las posiciones han sido cerradas o se han enviado órdenes de cierre")
             

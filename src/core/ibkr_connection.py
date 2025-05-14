@@ -157,11 +157,63 @@ class IBKRConnection:
                 if instance.ib.isConnected():
                     # Desuscribir de todos los datos de mercado
                     try:
-                        instance.logger.info(f"Cancelando solicitudes de datos de mercado para client_id: {client_id}")
-                        instance.ib.cancelMktData(None)  # Cancelar todas
-                    except:
-                        pass
+                        instance.logger.info(f"Limpiando recursos para client_id: {client_id}")
+                        
+                        # Obtener todos los tickers activos
+                        active_tickers = instance.ib.tickers()
+                        if active_tickers:
+                            instance.logger.info(f"Cancelando {len(active_tickers)} suscripciones de datos")
+                            for ticker in active_tickers:
+                                try:
+                                    instance.ib.cancelMktData(ticker.contract)
+                                except Exception as e:
+                                    # Ignorar errores de cancelación
+                                    pass
+                        
+                        # Cancelar cualquier orden pendiente
+                        try:
+                            open_trades = instance.ib.openTrades()
+                            if open_trades:
+                                instance.logger.info(f"Cancelando {len(open_trades)} órdenes pendientes")
+                                for trade in open_trades:
+                                    if trade.isActive():
+                                        instance.ib.cancelOrder(trade.order)
+                        except Exception as e:
+                            instance.logger.warning(f"Error al cancelar órdenes pendientes: {e}")
+                    except Exception as e:
+                        instance.logger.warning(f"Error durante la limpieza: {e}")
                         
                     # Desconectar
-                    instance.ib.disconnect()
-                    instance.logger.info(f"Desconectado de IBKR (client_id: {client_id})")
+                    try:
+                        instance.ib.disconnect()
+                        instance.logger.info(f"Desconectado de IBKR (client_id: {client_id})")
+                    except Exception as e:
+                        instance.logger.error(f"Error al desconectar de IBKR: {e}")
+                        
+    def disconnect(self):
+        """Cierra la conexión con IBKR de forma segura."""
+        if self.ib.isConnected():
+            try:
+                # Cancelar todas las suscripciones de datos activas
+                active_tickers = self.ib.tickers()
+                if active_tickers:
+                    self.logger.info(f"Cancelando {len(active_tickers)} suscripciones de datos")
+                    for ticker in active_tickers:
+                        try:
+                            self.ib.cancelMktData(ticker.contract)
+                        except:
+                            pass
+                            
+                # Ahora sí desconectar
+                self.ib.disconnect()
+                self.logger.info(f"Desconectado de IBKR (client_id: {self.client_id})")
+            except Exception as e:
+                self.logger.error(f"Error durante la desconexión: {e}")
+        else:
+            self.logger.debug(f"No era necesario desconectar (client_id: {self.client_id})")
+
+    def ensure_connection(self):
+        """Asegura que hay una conexión activa a IBKR."""
+        if not self.ib.isConnected():
+            return self.connect()
+        return True
