@@ -1,132 +1,118 @@
-# ODTE IBKR Strategies
+# ODTE IBKR Trading System
 
-Un framework modular para desarrollar, probar y ejecutar estrategias de trading de opciones 0DTE (Zero Days To Expiration) utilizando la API de Interactive Brokers (IBKR). Diseñado para facilitar la iteración rápida de estrategias, backtesting y análisis de rendimiento.
+Automated trading system for executing 0DTE options and earnings straddle strategies using Interactive Brokers API.
 
-## ⚠️ Descargo de Responsabilidad ⚠️
+## Overview
 
-> Este software es exclusivamente para fines **educativos y experimentales**. El trading de opciones conlleva riesgos significativos de pérdida financiera. Nunca uses este código con capital real sin entender completamente su funcionamiento y riesgos. El autor no asume ninguna responsabilidad por pérdidas financieras derivadas del uso de este software.
+This system includes two main trading bots:
 
-## Características
+1. **ODTE Breakout Bot** - Trades 0-Day-To-Expiration (0DTE) options based on breakout signals
+2. **Earnings Straddle Bot** - Executes straddle positions around company earnings announcements
 
-- **Arquitectura modular**: Framework extensible para múltiples estrategias
-- **Ejecución concurrente**: Capacidad de ejecutar varias estrategias simultáneamente
-- **Conexión IBKR**: Interfaz simplificada con la API de Interactive Brokers
-- **Backtesting integrado**: Validación de estrategias con datos históricos
-- **Análisis de rendimiento**: Métricas detalladas y visualizaciones
-- **Estrategias incluidas**: 
-  - ODTE Breakout: Opera breakouts en opciones 0DTE
-  - Earnings Straddle: Estrategia de straddle para earnings
+Both bots are designed to work with smaller accounts (optimized for $5K) and include risk management capabilities.
 
-## Configuración Inicial
+## Features
 
-1. Clonar el repositorio
-2. Instalar dependencias:
-```bash
-pip install -r requirements.txt
-```
-3. Inicializar archivos de configuración:
-```bash
-python run_strategy.py init
-```
-4. **Importante**: Editar los archivos en `config/` para incluir tus claves API y parámetros de trading.
+- Fully automated connection to IBKR TWS or Gateway
+- Configurable risk parameters (2-3% per trade)
+- Support for both options and futures contracts
+- Comprehensive market data handling with fallbacks
+- Position management with automated stop-loss and take-profit
+- ETF-focused for better liquidity and lower costs
+- Support for micro contracts to enable smaller account sizes
 
-## Uso Rápido
+## Requirements
 
-### Configuración de Paper Trading
+- Python 3.8+
+- Interactive Brokers account with TWS or IB Gateway
+- TWS/Gateway API enabled
+- ib_insync library
+- yfinance library (for earnings data)
 
-1. Abre TWS (Trader Workstation) o IB Gateway
-2. Activa API en Configuración > API > Habilitar API
-3. Conéctate con tu cuenta Paper Trading
-4. Ejecuta una o múltiples estrategias:
+## Setup
 
-```bash
-# Ejecutar una estrategia específica
-python run_strategy.py run odte_breakout
+1. Clone this repository
+2. Install dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+3. Configure settings in `config/odte_breakout_config.json` and `config/earnings_straddle_config.json`
+4. Launch TWS or IB Gateway and ensure API connections are enabled
 
-# Ejecutar todas las estrategias disponibles simultáneamente
-python run_strategy.py run all
+## Running the Bots
 
-# Verificar estrategias activas
-python run_strategy.py list
-```
-
-### Backtesting
+### ODTE Breakout Bot
 
 ```bash
-python run_strategy.py backtest odte_breakout --start-date 2023-01-01 --end-date 2023-06-30
+python odte_ibkr_full_auto.py --paper-trading
 ```
+
+### Earnings Straddle Bot
+
+```bash
+python straddle_earnings_bot.py --paper-trading
+```
+
+## Configuration
+
+### ODTE Breakout Config
+
+Key parameters:
+- `tickers`: List of high-volatility stocks from S&P 500 and tech sector
+- `max_capital`: Total capital to deploy (set to $5000)
+- `risk_per_trade`: Amount to risk per trade (2-3% of account, $150)
+- `max_daily_trades`: Maximum trades per day (default: 1)
+- `use_fractional_shares`: Whether to use fractional shares for expensive stocks
+
+### Earnings Straddle Config
+
+Key parameters:
+- `tickers_whitelist`: High-volatility stocks with active options chains
+- `max_capital_per_trade`: Maximum capital per straddle (3% of account, $150)
+- `min_iv_rank`: Minimum IV rank to consider (35%)
+- `max_days_to_expiry`: Maximum days to expiration (5 days)
+- `max_daily_trades`: Maximum trades per day (default: 1)
+- `use_micro_options`: Use fractional position sizing for expensive options
+
+## Risk Management
+
+The system implements several risk-management features:
+- Per-trade capital limits (2-3% of account)
+- Daily trade limits
+- Automated stop-loss and take-profit
+- Position time limits
+- Pre-market and after-hours handling
+- Market data verification
+
+## Original Framework
+
+This project is built on a modular framework for developing, testing, and executing 0DTE trading strategies using Interactive Brokers API. The framework includes:
+
+- **Modular architecture**: Extensible framework for multiple strategies
+- **Concurrent execution**: Ability to run multiple strategies simultaneously
+- **IBKR connection**: Simplified interface with Interactive Brokers API
+- **Backtesting**: Strategy validation with historical data
+- **Performance analysis**: Detailed metrics and visualizations
 
 ## Estructura del Proyecto
 
 ```
 odte-ibkr-strats/
-├── config/                   # Archivos de configuración
+├── config/                   # Configuration files
 ├── src/
-│   ├── backtesting/          # Motor de backtesting
-│   ├── core/                 # Componentes centrales
-│   ├── strategies/           # Estrategias implementadas
-│   └── utils/                # Utilidades generales
-├── run_strategy.py           # Script principal para ejecutar estrategias
+│   ├── backtesting/          # Backtesting engine
+│   ├── core/                 # Core components
+│   ├── strategies/           # Implemented strategies
+│   └── utils/                # General utilities
+├── odte_ibkr_full_auto.py    # ODTE Breakout standalone bot
+├── straddle_earnings_bot.py  # Earnings Straddle standalone bot 
+├── run_strategy.py           # Main script to run strategies
 ```
 
-## Requisitos
+## License
 
-- Python 3.7+
-- IB Insync
-- Pandas
-- Matplotlib
-- Requests
+This code is for educational and personal use only.
 
-## Seguridad
+## Disclaimer
 
-- **NO** commits tus archivos de configuración con API keys
-- Usa **SOLO** paper trading mientras pruebas
-- Revisa `.gitignore` para asegurar que archivos sensibles no se compartan
-- Nunca dejes trading automatizado sin supervisión
-
-## Estrategias Disponibles
-
-### ODTE Breakout
-
-Opera breakouts de precio en opciones que expiran el mismo día, utilizando filtros técnicos.
-
-```bash
-python run_strategy.py run odte_breakout
-```
-
-### Earnings Straddle
-
-Abre posiciones straddle antes de reportes de ganancias y cierra después del movimiento.
-
-```bash
-python run_strategy.py run earnings_straddle
-```
-
-### Ejecución Concurrente
-
-Para ejecutar todas las estrategias simultáneamente:
-
-```bash
-python run_strategy.py run all
-```
-
-Esto iniciará cada estrategia en su propio hilo, permitiendo monitorear todas las oportunidades al mismo tiempo. Cada estrategia utilizará su propia configuración y un ID de cliente diferente para evitar conflictos con la API de IBKR.
-
-## Desarrollo de Nuevas Estrategias
-
-Para crear tu propia estrategia:
-
-1. Extiende la clase base `StrategyBase` en un nuevo archivo en `src/strategies/`
-2. Implementa los métodos requeridos:
-   - `scan_for_opportunities()`
-   - `execute_trade()`
-   - `manage_positions()`
-3. Actualiza `run_strategy.py` para incluir tu estrategia
-
-## Contribuciones
-
-Las contribuciones son bienvenidas. Por favor, asegúrate de que tu código no contiene información sensible antes de enviar un pull request.
-
-## Licencia
-
-MIT
+Trading involves significant risk of loss. This software is provided "as is" without warranty of any kind. The authors accept no responsibility for losses incurred through the use of this software.
