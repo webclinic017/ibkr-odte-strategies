@@ -309,13 +309,14 @@ class MarketData:
         
         return market_open <= now.hour < market_close
         
-    def get_realtime_quote(self, symbol, client_id=1):
+    def get_realtime_quote(self, symbol, client_id=1, use_delayed=True):
         """
         Obtiene cotización en tiempo real desde IBKR
         
         Args:
             symbol (str): Símbolo del instrumento
             client_id (int): ID de cliente para la conexión IBKR
+            use_delayed (bool): Si se deben usar datos retrasados como respaldo
             
         Returns:
             dict: Datos de cotización o None si hay error
@@ -330,26 +331,92 @@ class MarketData:
         
         contract = Stock(symbol, 'SMART', 'USD')
         try:
+            # Calificar el contrato
             self.ibkr.ib.qualifyContracts(contract)
-            ticker = self.ibkr.ib.reqMktData(contract, '', False, False)
-            self.ibkr.ib.sleep(2)  # Esperar a que lleguen los datos
             
-            # Verificar si tenemos datos válidos
-            last_price = ticker.last if ticker.last else ticker.close
-            if not last_price:
-                self.logger.warning(f"No se pudo obtener precio para {symbol}")
-                return None
+            # Intentar primero con datos en tiempo real
+            try:
+                self.logger.info(f"Solicitando datos de mercado en tiempo real para {symbol}")
+                ticker = self.ibkr.ib.reqMktData(contract, '', False, False)
+                self.ibkr.ib.sleep(2)  # Esperar a que lleguen los datos
                 
-            return {
-                "symbol": symbol,
-                "last": ticker.last,
-                "bid": ticker.bid,
-                "ask": ticker.ask,
-                "close": ticker.close,
-                "volume": ticker.volume,
-                "timestamp": datetime.now().isoformat()
-            }
+                # Verificar si tenemos datos válidos
+                has_data = ticker.last or ticker.close or ticker.bid or ticker.ask
+                if has_data:
+                    self.logger.info(f"Datos en tiempo real obtenidos para {symbol}: Last: {ticker.last}, Close: {ticker.close}")
+                    return {
+                        "symbol": symbol,
+                        "last": ticker.last,
+                        "bid": ticker.bid,
+                        "ask": ticker.ask,
+                        "close": ticker.close,
+                        "volume": ticker.volume,
+                        "timestamp": datetime.now().isoformat(),
+                        "delayed": False
+                    }
+            except Exception as e:
+                subscription_error = "market data is not subscribed" in str(e).lower()
+                if subscription_error:
+                    self.logger.warning(f"No hay suscripción a datos en tiempo real para {symbol}")
+                else:
+                    self.logger.error(f"Error al obtener datos en tiempo real para {symbol}: {e}")
+                
+                if not use_delayed:
+                    return None
+                
+            # Si llegamos aquí, los datos en tiempo real no están disponibles
+            # Intentar con datos retrasados
+            if use_delayed:
+                try:
+                    self.logger.info(f"Intentando con datos retrasados para {symbol}")
+                    self.ibkr.ib.cancelMktData(contract)  # Cancelar solicitud anterior
+                    self.ibkr.ib.sleep(0.5)
+                    
+                    # Solicitar datos retrasados (generic tick types 233 = RTVolume)
+                    delayed_ticker = self.ibkr.ib.reqMktData(contract, '233', True, False)
+                    self.ibkr.ib.sleep(3)  # Esperar un poco más para datos retrasados
+                    
+                    # Verificar si tenemos datos válidos
+                    delayed_price = delayed_ticker.last or delayed_ticker.close or delayed_ticker.bid or delayed_ticker.ask
+                    if delayed_price:
+                        self.logger.info(f"Datos retrasados obtenidos para {symbol}: {delayed_price}")
+                        return {
+                            "symbol": symbol,
+                            "last": delayed_ticker.last,
+                            "bid": delayed_ticker.bid,
+                            "ask": delayed_ticker.ask,
+                            "close": delayed_ticker.close,
+                            "volume": delayed_ticker.volume,
+                            "timestamp": datetime.now().isoformat(),
+                            "delayed": True
+                        }
+                    else:
+                        self.logger.warning(f"No se pudieron obtener datos retrasados para {symbol}")
+                except Exception as delayed_e:
+                    self.logger.error(f"Error al obtener datos retrasados para {symbol}: {delayed_e}")
+                
+            # Como último recurso, usar Polygon.io si hay API key
+            if self.polygon_api_key:
+                self.logger.info(f"Intentando obtener datos de Polygon.io para {symbol}")
+                polygon_data = self.get_last_bar(symbol)
+                if polygon_data:
+                    self.logger.info(f"Datos obtenidos de Polygon.io para {symbol}: {polygon_data['close']}")
+                    return {
+                        "symbol": symbol,
+                        "last": polygon_data["close"],
+                        "bid": None,
+                        "ask": None,
+                        "close": polygon_data["close"],
+                        "volume": polygon_data["volume"],
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "polygon"
+                    }
+            
+            self.logger.error(f"No se pudo obtener precio para {symbol} de ninguna fuente")
+            return None
             
         except Exception as e:
+            import traceback
             self.logger.error(f"Error al obtener cotización para {symbol}: {e}")
+            self.logger.debug(traceback.format_exc())
             return None

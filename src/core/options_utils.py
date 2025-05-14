@@ -209,15 +209,67 @@ def get_atm_straddle(ib, symbol, expiry, exchange='SMART', currency='USD'):
         logger.debug(f"Calificando contrato de stock para {symbol}")
         ib.qualifyContracts(stock)
         
-        ticker = ib.reqMktData(stock, '', False, False)
-        ib.sleep(2)
-        
-        current_price = ticker.last if ticker.last else ticker.close
+        # Intentar primero con datos en tiempo real
+        try:
+            logger.info(f"Solicitando precio en tiempo real para {symbol}")
+            ticker = ib.reqMktData(stock, '', False, False)
+            ib.sleep(2)
+            
+            current_price = ticker.last if ticker.last else ticker.close
+            if current_price:
+                logger.debug(f"Precio en tiempo real de {symbol}: {current_price}")
+        except Exception as e:
+            subscription_error = "market data is not subscribed" in str(e).lower() or "Requested market data" in str(e)
+            if subscription_error:
+                logger.warning(f"No hay suscripción a datos en tiempo real para {symbol}. Intentando datos retrasados.")
+            else:
+                logger.error(f"Error al obtener datos en tiempo real para {symbol}: {e}")
+            current_price = None
+            
+        # Si no tenemos precio, intentar con datos retrasados
         if not current_price:
-            logger.error(f"No se pudo obtener precio para {symbol}. last: {ticker.last}, close: {ticker.close}")
+            try:
+                logger.info(f"Solicitando datos retrasados para {symbol}")
+                ib.cancelMktData(stock)  # Cancelar solicitud anterior
+                ib.sleep(0.5)
+                
+                # Solicitar datos retrasados
+                delayed_ticker = ib.reqMktData(stock, '', True, False)
+                ib.sleep(3)  # Esperar un poco más para datos retrasados
+                
+                current_price = delayed_ticker.last if delayed_ticker.last else delayed_ticker.close
+                if current_price:
+                    logger.info(f"Precio retrasado de {symbol}: {current_price}")
+                else:
+                    logger.warning(f"No se pudo obtener precio retrasado para {symbol}")
+            except Exception as delayed_e:
+                logger.error(f"Error al obtener datos retrasados para {symbol}: {delayed_e}")
+                
+        # Si aún no tenemos precio, intentar obtener precio de cierre o estimado
+        if not current_price:
+            try:
+                # Intentar obtener precio de cierre del contrato de acciones
+                details = ib.reqContractDetails(stock)
+                if details and len(details) > 0:
+                    for detail in details:
+                        if hasattr(detail.marketName) and detail.marketName:
+                            logger.info(f"Mercado para {symbol}: {detail.marketName}")
+                    summary = details[0].summary
+                    summary_details = details[0]
+                    
+                    # Buscar algún precio disponible
+                    if hasattr(summary_details, 'minTick') and summary_details.minTick > 0:
+                        logger.info(f"Usando tick size como estimación aproximada para {symbol}")
+                        current_price = float(summary_details.minTick) * 100
+            except Exception as e:
+                logger.error(f"Error al obtener detalles del contrato para {symbol}: {e}")
+        
+        # Si aún no tenemos precio, no podemos continuar
+        if not current_price:
+            logger.error(f"No se pudo obtener precio para {symbol} por ningún método")
             return None, None, None
             
-        logger.debug(f"Precio actual de {symbol}: {current_price}")
+        logger.debug(f"Precio final usado para {symbol}: {current_price}")
         
         # Obtener cadena de opciones
         logger.debug(f"Solicitando parámetros de opciones para {symbol}")
