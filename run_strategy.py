@@ -206,11 +206,11 @@ def init_config(args):
     
     # Configuración para ODTE Breakout
     odte_config = {
-        "tickers": ["SPY", "QQQ", "TSLA", "NVDA", "META", "AMD", "AMZN", "AAPL"],
+        "tickers": ["SPY", "QQQ", "TSLA", "NVDA", "META", "AMD", "AMZN", "AAPL", "GOOGL", "COIN", "SQ"],
         "max_capital": 10000,
         "risk_per_trade": 100,
-        "min_volume": 500,
-        "min_open_interest": 1000,
+        "min_volume": 200,         # Reducido para mayor sensibilidad
+        "min_open_interest": 500,  # Reducido para mayor sensibilidad
         "polygon_api_key": "TU_API_KEY_AQUI",
         "ibkr_host": "127.0.0.1",
         "ibkr_port": 7497,
@@ -218,16 +218,19 @@ def init_config(args):
         "orders_file": "data/odte_breakout_orders.json",
         "log_file": "data/odte_breakout_trades.csv",
         "scan_interval": 60,
-        "volume_multiplier": 1.2,
-        "tp_multiplier": 1.2,
-        "sl_multiplier": 0.6
+        "volume_multiplier": 0.9,   # Reducido para mayor sensibilidad
+        "tp_multiplier": 1.5,      # Aumentado para mejor rendimiento
+        "sl_multiplier": 0.7,      # Ajustado para mejor gestión de riesgo
+        "max_daily_trades": 3,     # Máximo número de trades por día
+        "min_score": 50           # Umbral reducido para mayor sensibilidad
     }
     
     # Configuración para Earnings Straddle
     straddle_config = {
         "tickers_whitelist": [
             "TSLA", "NFLX", "NVDA", "AMD", "META", "AMZN", 
-            "BABA", "SHOP", "ROKU", "COIN", "MSFT", "AAPL"
+            "BABA", "SHOP", "ROKU", "COIN", "MSFT", "AAPL",
+            "GOOGL", "ADBE", "CRM", "ZM", "PYPL", "SQ", "SNAP"
         ],
         "max_capital_per_trade": 500,
         "polygon_api_key": "TU_API_KEY_AQUI",
@@ -235,10 +238,16 @@ def init_config(args):
         "ibkr_port": 7497,
         "ibkr_client_id": 2,
         "data_dir": "data/earnings",
-        "scan_interval": 3600,
+        "scan_interval": 1800,       # Reducido a 30 minutos
         "auto_close_time": "14:35",
-        "entry_days_before": 1,
-        "exit_days_after": 1
+        "entry_days_before": 1,      
+        "exit_days_after": 1,
+        "min_iv_rank": 35,           # Reducido para mayor sensibilidad
+        "max_days_to_expiry": 7,     # Expiración máxima extendida
+        "use_simulation": True,      # Usar datos simulados
+        "max_daily_trades": 3,       # Máximo número de straddles por día
+        "same_day_entry": True,      # Permitir entrar el mismo día
+        "extended_hours": True       # Incluir horas extendidas para más oportunidades
     }
     
     # Guardar configuraciones
