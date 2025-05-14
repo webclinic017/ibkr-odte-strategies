@@ -407,15 +407,27 @@ def close_positions(args):
                 
             logger.info(f"Se encontraron {len(positions)} posiciones abiertas")
             
-            # Cerrar cada posición
+            # Separar las posiciones por tipo
+            futures_positions = []
+            other_positions = []
+            
             for position in positions:
+                if position.position == 0:  # Saltar posiciones con cantidad 0
+                    continue
+                    
+                contract_type = position.contract.secType
+                if contract_type == 'FUT':
+                    futures_positions.append(position)
+                else:
+                    other_positions.append(position)
+            
+            # Primero cerrar posiciones que no sean futuros (más sencillo)
+            for position in other_positions:
                 contract = position.contract
+                symbol = contract.symbol
                 quantity = position.position
                 
-                if quantity == 0:
-                    continue  # Saltar posiciones con cantidad 0
-                    
-                logger.info(f"Cerrando posición: {contract.symbol} {contract.secType} {quantity} unidades")
+                logger.info(f"Cerrando posición: {symbol} {contract.secType} {quantity} unidades")
                 
                 # Crear y enviar orden de cierre
                 from ib_insync import MarketOrder
@@ -424,33 +436,7 @@ def close_positions(args):
                 action = "SELL" if quantity > 0 else "BUY"
                 qty = abs(quantity)
                 
-                # Obtener el exchange apropiado para este contrato
-                exchange = contract.exchange
-                if not exchange or exchange == 'SMART':
-                    # Para futuros, necesitamos un exchange específico
-                    if contract.secType == 'FUT':
-                        # Intentar obtener primaryExchange o usar el exchange por defecto según el producto
-                        if hasattr(contract, 'primaryExchange') and contract.primaryExchange:
-                            exchange = contract.primaryExchange
-                        elif contract.symbol in ['ES', 'MES', 'NQ', 'MNQ', 'YM', 'MYM']:
-                            exchange = 'GLOBEX'  # Para futuros de índices CME
-                        elif contract.symbol in ['CL', 'GC', 'SI', 'HG']:
-                            exchange = 'NYMEX'  # Para futuros de commodities
-                        else:
-                            # Intentar obtenerlo desde los detalles del contrato
-                            try:
-                                details = ibkr.ib.reqContractDetails(contract)
-                                if details and details[0].marketName:
-                                    exchange = details[0].marketName
-                                else:
-                                    exchange = 'GLOBEX'  # Usar GLOBEX como fallback
-                            except:
-                                exchange = 'GLOBEX'  # Fallback si todo lo demás falla
-                
-                # Asegurarse de que el contrato tenga el exchange correcto
-                contract.exchange = exchange
-                
-                # Crear y enviar la orden
+                # Crear orden de mercado
                 try:
                     order = MarketOrder(action, qty)
                     trade = ibkr.ib.placeOrder(contract, order)
@@ -458,32 +444,278 @@ def close_positions(args):
                     
                     # Verificar estado de la orden
                     order_status = trade.orderStatus.status if hasattr(trade, 'orderStatus') else 'Unknown'
-                    logger.info(f"Orden de cierre enviada para {contract.symbol} ({contract.secType}, exchange: {exchange}). Estado: {order_status}")
-                except Exception as order_e:
-                    logger.error(f"Error al enviar orden para {contract.symbol}: {order_e}")
-                    # Intentar con un enfoque alternativo si es un futuro
-                    if contract.secType == 'FUT':
+                    logger.info(f"Orden de cierre enviada para {symbol} ({contract.secType}). Estado: {order_status}")
+                except Exception as e:
+                    logger.error(f"Error al cerrar posición {symbol}: {e}")
+            
+            # Ahora cerrar los futuros (más complicado)
+            for position in futures_positions:
+                # Obtener datos del contrato de futuro
+                contract = position.contract
+                symbol = contract.symbol
+                quantity = position.position
+                
+                logger.info(f"Cerrando futuro: {symbol} {contract.localSymbol if hasattr(contract, 'localSymbol') else ''} ({quantity} contratos)")
+                
+                # Si la cantidad es positiva, vendemos; si es negativa, compramos
+                action = "SELL" if quantity > 0 else "BUY"
+                qty = abs(quantity)
+                
+                # Método especial para MYM (Micro E-mini Dow)
+                if symbol == "MYM":
+                    try:
+                        from ib_insync import Future, MarketOrder
+                        logger.info(f"Utilizando método especial para MYM futures")
+                        
+                        # Obtener el localSymbol
+                        local_symbol = contract.localSymbol if hasattr(contract, 'localSymbol') else None
+                        trading_class = contract.tradingClass if hasattr(contract, 'tradingClass') else "MYM"
+                        contract_month = contract.lastTradeDateOrContractMonth if hasattr(contract, 'lastTradeDateOrContractMonth') else None
+                        
+                        # Intentar determinar el mes/año actual si no está disponible
+                        if not contract_month:
+                            from datetime import datetime
+                            now = datetime.now()
+                            month_codes = {1: 'F', 2: 'G', 3: 'H', 4: 'J', 5: 'K', 6: 'M', 
+                                         7: 'N', 8: 'Q', 9: 'U', 10: 'V', 11: 'X', 12: 'Z'}
+                            month_code = month_codes[now.month]
+                            year_code = str(now.year)[-1]  # Último dígito del año
+                            contract_month = f"20{year_code}{month_code}"
+                        
+                        # Método 1: Usar contrato mínimo
                         try:
-                            logger.info(f"Intentando cerrar futuro {contract.symbol} con método alternativo")
-                            # Crear un nuevo contrato con todos los detalles necesarios explícitamente
-                            from ib_insync import Future
-                            new_contract = Future(symbol=contract.symbol, 
-                                                 lastTradeDateOrContractMonth=contract.lastTradeDateOrContractMonth,
-                                                 exchange=exchange,
-                                                 currency=contract.currency,
-                                                 multiplier=contract.multiplier if hasattr(contract, 'multiplier') else None)
+                            # Para MYM, usar CBOT y el trading class MYM
+                            new_contract = Future(symbol="MYM", 
+                                                exchange="CBOT", 
+                                                currency="USD",
+                                                lastTradeDateOrContractMonth=contract_month,
+                                                tradingClass="MYM")
                             
-                            # Calificar el contrato para asegurarnos de que esté completo
+                            logger.info(f"Creado contrato simple para MYM: {new_contract}")
+                            
+                            # Si tenemos localSymbol, usarlo también
+                            if local_symbol:
+                                new_contract.localSymbol = local_symbol
+                                logger.info(f"Añadido localSymbol: {local_symbol}")
+                            
+                            # Intentar calificar y usar
                             ibkr.ib.qualifyContracts(new_contract)
-                            
-                            # Crear y enviar la orden con el contrato completo
-                            new_order = MarketOrder(action, qty)
-                            new_trade = ibkr.ib.placeOrder(new_contract, new_order)
+                            order = MarketOrder(action, qty)
+                            trade = ibkr.ib.placeOrder(new_contract, order)
                             ibkr.ib.sleep(1)
                             
-                            logger.info(f"Orden alternativa enviada para futuro {contract.symbol}")
-                        except Exception as alt_e:
-                            logger.error(f"También falló el método alternativo para {contract.symbol}: {alt_e}")
+                            order_status = trade.orderStatus.status if hasattr(trade, 'orderStatus') else 'Unknown'
+                            logger.info(f"Orden para MYM enviada: {order_status}")
+                            continue  # Siguiente posición
+                        except Exception as e:
+                            logger.warning(f"Método 1 para MYM falló: {e}")
+                        
+                        # Método 2: Usar un contrato YM (E-mini) en lugar de MYM
+                        try:
+                            # Si MYM no funciona, intentar con YM (contrato estándar)
+                            logger.info("Intentando con contrato E-mini YM")
+                            ym_contract = Future(symbol="YM", 
+                                               exchange="CBOT", 
+                                               currency="USD",
+                                               lastTradeDateOrContractMonth=contract_month,
+                                               tradingClass="YM")
+                            
+                            # Dividir la cantidad por 10 (MYM = 1/10 del tamaño de YM)
+                            ym_qty = max(1, qty // 10)
+                            
+                            # Calificar y enviar
+                            ibkr.ib.qualifyContracts(ym_contract)
+                            order = MarketOrder(action, ym_qty)
+                            trade = ibkr.ib.placeOrder(ym_contract, order)
+                            ibkr.ib.sleep(1)
+                            
+                            order_status = trade.orderStatus.status if hasattr(trade, 'orderStatus') else 'Unknown'
+                            logger.info(f"Orden para YM enviada: {order_status}")
+                            logger.warning(f"Nota: Se usó YM en lugar de MYM. La cantidad se ajustó de {qty} a {ym_qty}")
+                            continue  # Siguiente posición
+                        except Exception as e:
+                            logger.warning(f"Método 2 para MYM falló: {e}")
+                    
+                    except Exception as e:
+                        logger.error(f"Todos los métodos especiales para MYM fallaron: {e}")
+                        logger.error(f"Por favor, cierra la posición manualmente en la interfaz de IBKR")
+                
+                # Método 1: Usar localSymbol si existe (más preciso)
+                if hasattr(contract, 'localSymbol') and contract.localSymbol:
+                    try:
+                        from ib_insync import Future
+                        logger.info(f"Intentando cerrar futuro usando localSymbol: {contract.localSymbol}")
+                        
+                        # Crear contrato con localSymbol
+                        new_contract = Future(localSymbol=contract.localSymbol, exchange="GLOBEX")
+                        
+                        # Intentar ejecutar
+                        try:
+                            ibkr.ib.qualifyContracts(new_contract)
+                            order = MarketOrder(action, qty)
+                            trade = ibkr.ib.placeOrder(new_contract, order)
+                            ibkr.ib.sleep(1)
+                            
+                            order_status = trade.orderStatus.status if hasattr(trade, 'orderStatus') else 'Unknown'
+                            logger.info(f"Orden para futuro {contract.localSymbol}: estado {order_status}")
+                            continue  # Si tiene éxito, continuar con el siguiente
+                        except Exception as e1:
+                            logger.warning(f"Error al usar localSymbol para {symbol}: {e1}")
+                    except Exception as e:
+                        logger.error(f"Error en método 1 para {symbol}: {e}")
+                
+                # Método 2: Usar reqContractDetails para obtener detalles completos
+                try:
+                    logger.info(f"Obteniendo detalles completos del contrato para {symbol}")
+                    # Recrear contrato
+                    from ib_insync import ContractDetails, Contract
+                    
+                    # Obtener detalles completos
+                    details = ibkr.ib.reqContractDetails(contract)
+                    if details and len(details) > 0:
+                        detail = details[0]
+                        # Usar el contrato exacto de los detalles
+                        exact_contract = detail.contract
+                        logger.info(f"Contrato exacto encontrado: {exact_contract.localSymbol} en {exact_contract.exchange}")
+                        
+                        # Usar este contrato para la orden
+                        try:
+                            order = MarketOrder(action, qty)
+                            trade = ibkr.ib.placeOrder(exact_contract, order)
+                            ibkr.ib.sleep(1)
+                            
+                            order_status = trade.orderStatus.status if hasattr(trade, 'orderStatus') else 'Unknown'
+                            logger.info(f"Orden para futuro usando contrato exacto: estado {order_status}")
+                            continue  # Si tiene éxito, continuar con el siguiente
+                        except Exception as e2:
+                            logger.warning(f"Error al usar contrato exacto para {symbol}: {e2}")
+                    else:
+                        logger.warning(f"No se encontraron detalles para {symbol}")
+                except Exception as e:
+                    logger.error(f"Error en método 2 para {symbol}: {e}")
+                    
+                # Método 3: Crear nuevo contrato desde cero
+                try:
+                    from ib_insync import Future
+                    logger.info(f"Creando nuevo contrato para {symbol} desde cero")
+                    
+                    # Mapeo de exchanges por symbol
+                    exchange_map = {
+                        "MYM": "CBOT",  # Micro Dow Jones
+                        "ES": "CME",    # E-mini S&P 500
+                        "MES": "CME",   # Micro E-mini S&P 500
+                        "NQ": "CME",    # E-mini NASDAQ 100
+                        "MNQ": "CME",   # Micro E-mini NASDAQ 100
+                        "RTY": "CME",   # E-mini Russell 2000
+                        "M2K": "CME",   # Micro E-mini Russell 2000
+                        "GC": "COMEX",  # Gold
+                        "SI": "COMEX",  # Silver
+                        "HG": "COMEX",  # Copper
+                        "CL": "NYMEX",  # Crude Oil
+                        "NG": "NYMEX",  # Natural Gas
+                        "ZB": "CBOT",   # 30-Year US Treasury Bond
+                        "ZN": "CBOT",   # 10-Year US Treasury Note
+                        "ZF": "CBOT",   # 5-Year US Treasury Note
+                        "ZT": "CBOT",   # 2-Year US Treasury Note
+                        "ZC": "CBOT",   # Corn
+                        "ZW": "CBOT",   # Wheat
+                        "ZS": "CBOT"    # Soybeans
+                    }
+                    
+                    # Obtener el exchange correcto para el símbolo
+                    exchange = exchange_map.get(symbol, "SMART")
+                    
+                    # Para índices principales, usar CME por defecto si no está en el mapeo
+                    if symbol.startswith("M") or symbol in ["ES", "NQ", "RTY"]:
+                        exchange = exchange_map.get(symbol, "CME")
+                    
+                    # Fecha del contrato
+                    expiry = contract.lastTradeDateOrContractMonth if hasattr(contract, 'lastTradeDateOrContractMonth') else None
+                    if not expiry:
+                        # Si no tenemos fecha, intentar adivinar el contrato activo
+                        from datetime import datetime
+                        now = datetime.now()
+                        month_codes = {1: 'F', 2: 'G', 3: 'H', 4: 'J', 5: 'K', 6: 'M', 
+                                     7: 'N', 8: 'Q', 9: 'U', 10: 'V', 11: 'X', 12: 'Z'}
+                        month_code = month_codes[now.month]
+                        year_code = str(now.year)[-1]  # Último dígito del año
+                        expiry = f"20{year_code}{month_code}"
+                    
+                    logger.info(f"Usando expiry: {expiry} y exchange: {exchange}")
+                    
+                    # Crear nuevo contrato
+                    multiplier = contract.multiplier if hasattr(contract, 'multiplier') else None
+                    currency = contract.currency if hasattr(contract, 'currency') else "USD"
+                    
+                    # Obtener trading class si está disponible
+                    trading_class = contract.tradingClass if hasattr(contract, 'tradingClass') else None
+                    
+                    # Obtener el número de contrato (conId) si está disponible
+                    con_id = contract.conId if hasattr(contract, 'conId') else None
+                    
+                    # Crear contrato con todos los datos posibles
+                    new_contract = Future(
+                        symbol=symbol,
+                        lastTradeDateOrContractMonth=expiry,
+                        exchange=exchange,
+                        currency=currency,
+                        multiplier=multiplier,
+                        tradingClass=trading_class,
+                        conId=con_id
+                    )
+                    
+                    # Si hay localSymbol, usarlo también
+                    if hasattr(contract, 'localSymbol') and contract.localSymbol:
+                        new_contract.localSymbol = contract.localSymbol
+                    
+                    logger.info(f"Contrato completo: {new_contract}")
+                    
+                    try:
+                        # Calificar el contrato
+                        ibkr.ib.qualifyContracts(new_contract)
+                        
+                        # Crear y enviar orden
+                        order = MarketOrder(action, qty)
+                        trade = ibkr.ib.placeOrder(new_contract, order)
+                        ibkr.ib.sleep(1)
+                        
+                        order_status = trade.orderStatus.status if hasattr(trade, 'orderStatus') else 'Unknown'
+                        logger.info(f"Orden para futuro usando contrato nuevo: estado {order_status}")
+                        continue  # Si tiene éxito, continuar con el siguiente
+                    except Exception as e3:
+                        logger.warning(f"Error al usar contrato nuevo para {symbol}: {e3}")
+                except Exception as e:
+                    logger.error(f"Error en método 3 para {symbol}: {e}")
+                
+                # Método 4: Último recurso - intentar cerrar usando el contrato original
+                try:
+                    from ib_insync import MarketOrder
+                    logger.info(f"Intentando último método para {symbol}")
+                    
+                    # Intentar asignar exchange
+                    if not contract.exchange or contract.exchange == "SMART":
+                        contract.exchange = "GLOBEX"  # Para índices
+                    
+                    # Para MYM, intentar específicamente con CBOT exchange
+                    if symbol == "MYM":
+                        contract.exchange = "CBOT"
+                    
+                    # Mostrar contrato final de último intento
+                    logger.info(f"Contrato de último intento: {contract}")
+                        
+                    # Crear y enviar orden
+                    order = MarketOrder(action, qty)
+                    trade = ibkr.ib.placeOrder(contract, order)
+                    ibkr.ib.sleep(1)
+                    
+                    order_status = trade.orderStatus.status if hasattr(trade, 'orderStatus') else 'Unknown'
+                    logger.info(f"Orden para futuro (último método): estado {order_status}")
+                except Exception as e:
+                    logger.error(f"Todos los métodos fallaron para cerrar futuro {symbol}: {e}")
+                    logger.error(f"Intenta cerrar manualmente la posición para {symbol} o intentar nuevamente más tarde")
+                    # Sugerir al usuario usar la web de IBKR
+                    logger.info(f"Recomendación: Intenta cerrar la posición directamente en la interfaz web de IBKR")
+
                     
                 
             logger.info("Todas las posiciones han sido cerradas o se han enviado órdenes de cierre")

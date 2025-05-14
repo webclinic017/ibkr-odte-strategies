@@ -4,7 +4,7 @@ from ib_insync import MarketOrder, Stock
 import json
 import os
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import logging
 import colorama
@@ -192,48 +192,121 @@ class ODTEBreakoutStrategy(StrategyBase):
         """Inicializa el análisis de tendencias de mercado."""
         self.logger.info("Inicializando análisis de tendencias de mercado")
         
+        from datetime import datetime, timedelta
+        
+        # Primero definimos tendencias por defecto para todos los tickers
         for ticker in self.tickers:
-            # Intentar obtener datos históricos recientes (últimas 3 horas)
+            self.market_trends[ticker] = {
+                "trend": "NEUTRAL",
+                "strength": 0.0,
+                "updated_at": datetime.now()
+            }
+        
+        # Ahora intentamos obtener datos históricos para cada ticker
+        for ticker in self.tickers:
+            # Intentar obtener datos históricos recientes (últimas 6 horas para más contexto)
             now = datetime.now()
-            start_date = (now - timedelta(hours=3)).strftime('%Y-%m-%d')
+            start_date = (now - timedelta(hours=6)).strftime('%Y-%m-%d')
             end_date = now.strftime('%Y-%m-%d')
             
+            self.logger.info(f"Obteniendo datos históricos para {ticker} desde {start_date} hasta {end_date}")
+            
             try:
+                # Intento 1: Obtener datos de minutos desde market_data
                 data = self.market_data.get_historical_data(ticker, start_date, end_date, timeframe='minute')
-                if data is not None and not data.empty:
-                    # Calcular tendencia basada en los últimos datos
-                    closes = data['close'].values
-                    if len(closes) > 10:
-                        current = closes[-1]
-                        prev_10 = closes[-10]
-                        prev_5 = closes[-5]
+                
+                # Verificar si tenemos datos válidos
+                if data is None or data.empty or len(data) < 10:
+                    self.logger.warning(f"Datos insuficientes de minutos para {ticker}, intentando datos diarios")
+                    
+                    # Intento 2: Obtener datos diarios (últimos 10 días)
+                    try:
+                        daily_start = (now - timedelta(days=10)).strftime('%Y-%m-%d')
+                        data = self.market_data.get_historical_data(ticker, daily_start, end_date, timeframe='day')
+                    except Exception as daily_e:
+                        self.logger.warning(f"Error al obtener datos diarios para {ticker}: {daily_e}")
+                
+                # Calcular tendencia si tenemos datos
+                if data is not None and not data.empty and len(data) >= 3:
+                    # Calcular SMA corta y larga si hay suficientes datos
+                    if len(data) >= 10:
+                        # SMA corta (5 períodos)
+                        data['sma5'] = data['close'].rolling(window=5).mean()
+                        # SMA larga (10 períodos)
+                        data['sma10'] = data['close'].rolling(window=10).mean()
                         
-                        # Determinar tendencia basada en precios recientes
-                        if current > prev_10 and current > prev_5 and prev_5 > prev_10:
-                            trend = "BULLISH"
-                            strength = min(1.0, (current - prev_10) / prev_10 * 10)  # Normalizado entre 0-1
-                        elif current < prev_10 and current < prev_5 and prev_5 < prev_10:
-                            trend = "BEARISH"
-                            strength = min(1.0, (prev_10 - current) / prev_10 * 10)  # Normalizado entre 0-1
-                        else:
-                            trend = "NEUTRAL"
-                            strength = 0.0
+                        # Obtener últimos valores válidos
+                        valid_data = data.dropna(subset=['sma5', 'sma10'])
+                        
+                        if not valid_data.empty:
+                            last_row = valid_data.iloc[-1]
                             
-                        self.market_trends[ticker] = {
-                            "trend": trend,
-                            "strength": strength,
-                            "updated_at": datetime.now()
-                        }
+                            current_price = last_row['close'] 
+                            sma5 = last_row['sma5']
+                            sma10 = last_row['sma10']
+                            
+                            # Determinar tendencia
+                            if sma5 > sma10 and current_price > sma5:
+                                trend = "BULLISH"
+                                # Calcular fuerza normalizada entre 0-1
+                                strength = min(1.0, (current_price / sma10 - 1) * 5)
+                            elif sma5 < sma10 and current_price < sma5:
+                                trend = "BEARISH"
+                                # Calcular fuerza normalizada entre 0-1
+                                strength = min(1.0, (sma10 / current_price - 1) * 5)
+                            else:
+                                # Tendencia menos clara
+                                if current_price > sma5:
+                                    trend = "BULLISH"
+                                    strength = 0.3
+                                elif current_price < sma5:
+                                    trend = "BEARISH"
+                                    strength = 0.3
+                                else:
+                                    trend = "NEUTRAL"
+                                    strength = 0.0
+                            
+                            self.market_trends[ticker] = {
+                                "trend": trend,
+                                "strength": strength,
+                                "updated_at": datetime.now(),
+                                "data_source": "historical_data"
+                            }
+                            
+                            self.logger.info(f"Tendencia inicializada para {ticker}: {trend} (fuerza: {strength:.2f})")
+                            continue
+                
+                # Si no pudimos calcular con SMAs, usar una aproximación simple
+                if data is not None and not data.empty and len(data) >= 3:
+                    # Aproximación simple: comparar precio actual con anteriores
+                    closes = data['close'].values
+                    current = closes[-1]
+                    prev = closes[-2] if len(closes) > 1 else current
+                    prev_3 = closes[-3] if len(closes) > 2 else prev
+                    
+                    # Determinar tendencia simple
+                    if current > prev and current > prev_3:
+                        trend = "BULLISH"
+                        strength = min(1.0, (current / prev_3 - 1) * 5)
+                    elif current < prev and current < prev_3:
+                        trend = "BEARISH"
+                        strength = min(1.0, (prev_3 / current - 1) * 5)
+                    else:
+                        trend = "NEUTRAL"
+                        strength = 0.2  # Ligera tendencia para dar algo de señal
                         
-                        self.logger.info(f"Tendencia para {ticker}: {trend} (fuerza: {strength:.2f})")
+                    self.market_trends[ticker] = {
+                        "trend": trend,
+                        "strength": strength,
+                        "updated_at": datetime.now(),
+                        "data_source": "simple_comparison"
+                    }
+                    
+                    self.logger.info(f"Tendencia simple para {ticker}: {trend} (fuerza: {strength:.2f})")
+                
             except Exception as e:
                 self.logger.error(f"Error al analizar tendencia para {ticker}: {e}")
-                # Establecer tendencia neutral por defecto
-                self.market_trends[ticker] = {
-                    "trend": "NEUTRAL",
-                    "strength": 0.0,
-                    "updated_at": datetime.now()
-                }
+                # La tendencia neutral ya fue establecida por defecto
     
     def scan_for_opportunities(self):
         """Busca oportunidades de breakout en los tickers configurados."""
@@ -392,27 +465,54 @@ class ODTEBreakoutStrategy(StrategyBase):
         if not r:
             return None
             
-        volume_threshold = r["volume"] * self.config["volume_multiplier"]
-        price_threshold = (r["high"] - r["low"]) * 0.3  # 30% del rango como umbral
+        # Reducir umbral de volumen para mayor sensibilidad
+        volume_threshold = r["volume"] * self.config.get("volume_multiplier", 0.8)
         
-        # Breakout alcista
-        if price > r["high"] - price_threshold and volume > volume_threshold * 0.8:
-            self.logger.info(f"Breakout CALL detectado para {ticker}: {price} > {r['high']} (o cercano), Vol: {volume}")
+        # Reducir umbral de precio para ser más sensible (15% del rango)
+        price_threshold = (r["high"] - r["low"]) * 0.15
+        
+        # Calcular porcentaje del rango actual
+        range_width = r["high"] - r["low"]
+        position_in_range = (price - r["low"]) / range_width if range_width > 0 else 0.5
+        
+        # Obtener tendencia de mercado si está disponible
+        market_trend = "NEUTRAL"
+        trend_strength = 0.0
+        if ticker in self.market_trends:
+            market_trend = self.market_trends[ticker]["trend"]
+            trend_strength = self.market_trends[ticker]["strength"]
+        
+        # Breakout alcista - ahora más sensible
+        # Condición 1: Precio cerca o por encima del máximo
+        # Condición 2: Volumen suficiente o tendencia alcista
+        if (price > r["high"] - price_threshold and volume > volume_threshold * 0.6) or \
+           (price > r["open"] and position_in_range > 0.65 and market_trend == "BULLISH"):
+            self.logger.info(f"Breakout CALL detectado para {ticker}: {price} > {r['high']} (o cercano), Vol: {volume}, Pos: {position_in_range:.2f}")
             return "CALL"
-        # Breakout bajista
-        elif price < r["low"] + price_threshold and volume > volume_threshold * 0.8:
-            self.logger.info(f"Breakout PUT detectado para {ticker}: {price} < {r['low']} (o cercano), Vol: {volume}")
+            
+        # Breakout bajista - ahora más sensible
+        # Condición 1: Precio cerca o por debajo del mínimo
+        # Condición 2: Volumen suficiente o tendencia bajista
+        elif (price < r["low"] + price_threshold and volume > volume_threshold * 0.6) or \
+             (price < r["open"] and position_in_range < 0.35 and market_trend == "BEARISH"):
+            self.logger.info(f"Breakout PUT detectado para {ticker}: {price} < {r['low']} (o cercano), Vol: {volume}, Pos: {position_in_range:.2f}")
             return "PUT"
-        # Breakout por tendencia intraday
-        elif ticker in self.market_trends and self.market_trends[ticker]["trend"] != "NEUTRAL":
-            trend = self.market_trends[ticker]["trend"]
-            strength = self.market_trends[ticker]["strength"]
-            if trend == "BULLISH" and strength > 0.5:
-                self.logger.info(f"Breakout CALL por tendencia para {ticker}: fuerza {strength}")
+            
+        # Breakout por tendencia intraday - ahora más sensible
+        elif market_trend != "NEUTRAL":
+            # Reducido el umbral de fuerza para detectar más señales
+            if market_trend == "BULLISH" and trend_strength > 0.3 and position_in_range > 0.5:
+                self.logger.info(f"Breakout CALL por tendencia para {ticker}: fuerza {trend_strength}, posición en rango: {position_in_range:.2f}")
                 return "CALL"
-            elif trend == "BEARISH" and strength > 0.5:
-                self.logger.info(f"Breakout PUT por tendencia para {ticker}: fuerza {strength}")
+            elif market_trend == "BEARISH" and trend_strength > 0.3 and position_in_range < 0.5:
+                self.logger.info(f"Breakout PUT por tendencia para {ticker}: fuerza {trend_strength}, posición en rango: {position_in_range:.2f}")
                 return "PUT"
+        
+        # Caso especial: Romper rango significativamente
+        if price > r["high"] * 1.01 or price < r["low"] * 0.99:
+            direction = "CALL" if price > r["high"] * 1.01 else "PUT"
+            self.logger.info(f"Breakout {direction} por ruptura de rango significativa para {ticker}: {price}")
+            return direction
             
         return None
     

@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import os
 from .ibkr_connection import IBKRConnection
+from ib_insync import Stock, Future
 
 class MarketData:
     """Clase para obtener y gestionar datos de mercado de diversas fuentes."""
@@ -308,6 +309,93 @@ class MarketData:
         market_close = 20  # 20:00 UTC = 16:00 EST
         
         return market_open <= now.hour < market_close
+        
+    def get_future_quote(self, symbol, client_id=1, use_delayed=True):
+        """Obtiene cotización en tiempo real para contratos de futuros."""
+        # Obtener conexión IBKR
+        if self.ibkr is None or self.ibkr.client_id != client_id:
+            self.ibkr = self.get_ibkr_connection(client_id)
+            
+        self.ibkr.ensure_connection()
+        
+        # Mapeo de exchanges recomendados para diferentes futuros
+        exchange_map = {
+            "MYM": "CBOT",  # Micro Dow Jones
+            "YM": "CBOT",   # E-mini Dow Jones
+            "ES": "CME",    # E-mini S&P 500
+            "MES": "CME",   # Micro E-mini S&P 500
+            "NQ": "CME",    # E-mini NASDAQ 100
+            "MNQ": "CME",   # Micro E-mini NASDAQ 100
+            "RTY": "CME",   # E-mini Russell 2000
+            "M2K": "CME",   # Micro E-mini Russell 2000
+            "GC": "COMEX",  # Gold
+            "SI": "COMEX",  # Silver
+            "HG": "COMEX",  # Copper
+            "CL": "NYMEX",  # Crude Oil
+            "NG": "NYMEX"   # Natural Gas
+        }
+        
+        # Obtener el exchange apropiado
+        exchange = exchange_map.get(symbol, "SMART")
+        
+        # Determinar el mes del contrato activo
+        from datetime import datetime
+        now = datetime.now()
+        month_codes = {1: 'F', 2: 'G', 3: 'H', 4: 'J', 5: 'K', 6: 'M', 
+                     7: 'N', 8: 'Q', 9: 'U', 10: 'V', 11: 'X', 12: 'Z'}
+        month_code = month_codes[now.month]
+        year_code = str(now.year)[-1]  # Último dígito del año
+        contract_month = f"20{year_code}{month_code}"
+        
+        # Crear contrato de futuro
+        contract = Future(symbol=symbol, exchange=exchange, currency="USD",
+                         lastTradeDateOrContractMonth=contract_month)
+        
+        try:
+            # Calificar el contrato
+            self.ibkr.ib.qualifyContracts(contract)
+            
+            # Solicitar datos
+            ticker = self.ibkr.ib.reqMktData(contract, '', False, False)
+            self.ibkr.ib.sleep(2)
+            
+            current_price = ticker.last or ticker.close or ticker.bid or ticker.ask
+            if current_price:
+                self.logger.info(f"Precio de futuro {symbol}: {current_price}")
+                return {
+                    "symbol": symbol,
+                    "price": current_price,
+                    "bid": ticker.bid,
+                    "ask": ticker.ask,
+                    "volume": ticker.volume,
+                    "delayed": False
+                }
+                
+            # Intentar con datos retrasados si no hay precio
+            if use_delayed and not current_price:
+                try:
+                    self.ibkr.ib.cancelMktData(contract)
+                    self.ibkr.ib.sleep(0.5)
+                    delayed_ticker = self.ibkr.ib.reqMktData(contract, '', True, False)
+                    self.ibkr.ib.sleep(2)
+                    
+                    delayed_price = delayed_ticker.last or delayed_ticker.close or delayed_ticker.bid or delayed_ticker.ask
+                    if delayed_price:
+                        self.logger.info(f"Precio retrasado de futuro {symbol}: {delayed_price}")
+                        return {
+                            "symbol": symbol,
+                            "price": delayed_price,
+                            "bid": delayed_ticker.bid,
+                            "ask": delayed_ticker.ask,
+                            "volume": delayed_ticker.volume,
+                            "delayed": True
+                        }
+                except Exception as de:
+                    self.logger.warning(f"Error al obtener datos retrasados para futuro {symbol}: {de}")
+        except Exception as e:
+            self.logger.error(f"Error al obtener cotización para futuro {symbol}: {e}")
+            
+        return None
         
     def get_realtime_quote(self, symbol, client_id=1, use_delayed=True):
         """
