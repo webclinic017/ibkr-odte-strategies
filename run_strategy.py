@@ -316,6 +316,130 @@ def list_strategies(args):
             pass
         logger.info(f"- {name}: {status} (IBKR client_id: {client_id})")
 
+# Comando para cerrar todas las posiciones
+def close_positions(args):
+    """Cierra todas las posiciones abiertas o de una estrategia específica."""
+    logger = logging.getLogger('close_positions')
+    
+    # Determinar si cerramos posiciones de una estrategia específica o todas
+    if args.strategy != 'all':
+        # Cerrar posiciones de una estrategia específica
+        logger.info(f"Cerrando posiciones de la estrategia: {args.strategy}")
+        
+        # Inicializar la conexión IBKR
+        client_id = args.client_id or 1
+        ibkr = IBKRConnection(client_id=client_id)
+        if not ibkr.connect():
+            logger.error("No se pudo conectar a IBKR. Verifica que TWS o IB Gateway está en ejecución.")
+            return
+            
+        # Inicializar la estrategia correspondiente
+        strategy = None
+        if args.strategy == 'odte_breakout':
+            # Cargar configuración
+            config_path = args.config or f"config/{args.strategy.lower()}_config.json"
+            config = load_config(config_path)
+            if not config:
+                logger.error(f"No se pudo cargar la configuración para {args.strategy}")
+                return
+                
+            # Verificar que client_id sea un entero
+            if 'ibkr_client_id' in config:
+                config['ibkr_client_id'] = int(config['ibkr_client_id'])
+                
+            # Crear estrategia
+            strategy = ODTEBreakoutStrategy(config)
+            
+            # Cerrar todas las posiciones de esta estrategia
+            logger.info("Cerrando todas las posiciones de ODTE Breakout")
+            try:
+                strategy.close_all_positions()
+                logger.info("Todas las posiciones cerradas exitosamente")
+            except Exception as e:
+                logger.error(f"Error al cerrar posiciones: {e}")
+                
+        elif args.strategy == 'earnings_straddle':
+            # Cargar configuración
+            config_path = args.config or f"config/{args.strategy.lower()}_config.json"
+            config = load_config(config_path)
+            if not config:
+                logger.error(f"No se pudo cargar la configuración para {args.strategy}")
+                return
+                
+            # Verificar que client_id sea un entero
+            if 'ibkr_client_id' in config:
+                config['ibkr_client_id'] = int(config['ibkr_client_id'])
+                
+            # Crear estrategia
+            strategy = EarningsStraddleStrategy(config)
+            
+            # Cerrar todos los straddles activos
+            logger.info("Cerrando todos los straddles activos")
+            for ticker, straddle in list(strategy.active_straddles.items()):
+                if straddle["status"] == "OPEN":
+                    try:
+                        logger.info(f"Cerrando straddle para {ticker}")
+                        strategy.close_straddle(ticker)
+                    except Exception as e:
+                        logger.error(f"Error al cerrar straddle para {ticker}: {e}")
+                        
+            logger.info("Todos los straddles activos han sido cerrados")
+        else:
+            logger.error(f"Estrategia desconocida: {args.strategy}")
+            return
+    else:
+        # Cerrar todas las posiciones en IBKR
+        logger.info("Cerrando todas las posiciones abiertas en IBKR")
+        
+        # Inicializar la conexión IBKR
+        client_id = args.client_id or 1
+        ibkr = IBKRConnection(client_id=client_id)
+        if not ibkr.connect():
+            logger.error("No se pudo conectar a IBKR. Verifica que TWS o IB Gateway está en ejecución.")
+            return
+            
+        # Obtener todas las posiciones abiertas
+        try:
+            positions = ibkr.ib.positions()
+            if not positions:
+                logger.info("No hay posiciones abiertas en IBKR")
+                return
+                
+            logger.info(f"Se encontraron {len(positions)} posiciones abiertas")
+            
+            # Cerrar cada posición
+            for position in positions:
+                contract = position.contract
+                quantity = position.position
+                
+                if quantity == 0:
+                    continue  # Saltar posiciones con cantidad 0
+                    
+                logger.info(f"Cerrando posición: {contract.symbol} {contract.secType} {quantity} unidades")
+                
+                # Crear y enviar orden de cierre
+                from ib_insync import MarketOrder
+                
+                # Si la cantidad es positiva, vendemos; si es negativa, compramos
+                action = "SELL" if quantity > 0 else "BUY"
+                qty = abs(quantity)
+                
+                order = MarketOrder(action, qty)
+                trade = ibkr.ib.placeOrder(contract, order)
+                ibkr.ib.sleep(1)  # Pequeña pausa
+                
+                logger.info(f"Orden de cierre enviada para {contract.symbol}")
+                
+            logger.info("Todas las posiciones han sido cerradas o se han enviado órdenes de cierre")
+            
+        except Exception as e:
+            logger.error(f"Error al cerrar posiciones: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
+    # Asegurarnos de cerrar la conexión IBKR al finalizar
+    IBKRConnection.cleanup_all()
+
 if __name__ == "__main__":
     # Configurar manejo de señales
     signal.signal(signal.SIGINT, signal_handler)
@@ -353,6 +477,13 @@ if __name__ == "__main__":
     # Subcomando para listar estrategias activas
     list_parser = subparsers.add_parser('list', help='Listar estrategias activas')
     
+    # Subcomando para cerrar posiciones
+    close_parser = subparsers.add_parser('close', help='Cerrar posiciones abiertas')
+    close_parser.add_argument('strategy', choices=['odte_breakout', 'earnings_straddle', 'all'],
+                           help='Estrategia cuyas posiciones cerrar ("all" para todas)')
+    close_parser.add_argument('-c', '--config', help='Ruta al archivo de configuración')
+    close_parser.add_argument('--client-id', type=int, help='ID de cliente para IBKR')
+    
     # Parsear argumentos
     args = parser.parse_args()
     
@@ -365,5 +496,7 @@ if __name__ == "__main__":
         init_config(args)
     elif args.command == 'list':
         list_strategies(args)
+    elif args.command == 'close':
+        close_positions(args)
     else:
         parser.print_help()
