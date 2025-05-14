@@ -3,6 +3,30 @@ import logging
 import os
 from datetime import datetime
 from ..core.ibkr_connection import IBKRConnection
+import colorama
+
+# Inicializar colorama para colores en terminal
+colorama.init()
+
+# Crear un formateador colorido para los mensajes de error
+class ColoredFormatter(logging.Formatter):
+    def format(self, record):
+        # Formato base
+        log_message = super().format(record)
+        
+        # Aplicar colores según el nivel
+        if record.levelno >= logging.ERROR:
+            # Rojo para ERROR y CRITICAL
+            return f"{colorama.Fore.RED}{log_message}{colorama.Style.RESET_ALL}"
+        elif record.levelno >= logging.WARNING:
+            # Amarillo para WARNING
+            return f"{colorama.Fore.YELLOW}{log_message}{colorama.Style.RESET_ALL}"
+        elif record.levelno >= logging.INFO:
+            # Verde para INFO
+            return f"{colorama.Fore.GREEN}{log_message}{colorama.Style.RESET_ALL}"
+        else:
+            # Cyan para DEBUG
+            return f"{colorama.Fore.CYAN}{log_message}{colorama.Style.RESET_ALL}"
 
 class StrategyBase(ABC):
     """Clase base abstracta para todas las estrategias de trading."""
@@ -34,19 +58,18 @@ class StrategyBase(ABC):
         # Crear directorio de logs si no existe
         os.makedirs("logs", exist_ok=True)
         
-        # Handler para archivo
+        # Handler para archivo (sin colores)
         log_file = f"logs/{self.name}_{datetime.now().strftime('%Y%m%d')}.log"
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(logging.DEBUG)
+        file_formatter = logging.Formatter(f'[%(asctime)s] %(levelname)s [{self.name}] - %(message)s')
+        file_handler.setFormatter(file_formatter)
         
-        # Handler para consola
+        # Handler para consola (con colores)
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.INFO)
-        
-        # Formato
-        formatter = logging.Formatter(f'[%(asctime)s] %(levelname)s [{self.name}] - %(message)s')
-        file_handler.setFormatter(formatter)
-        console_handler.setFormatter(formatter)
+        colored_formatter = ColoredFormatter(f'[%(asctime)s] %(levelname)s [{self.name}] - %(message)s')
+        console_handler.setFormatter(colored_formatter)
         
         logger.addHandler(file_handler)
         logger.addHandler(console_handler)

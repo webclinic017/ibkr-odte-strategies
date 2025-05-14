@@ -12,11 +12,35 @@ import sys
 import threading
 import time
 import asyncio
+import colorama
 from datetime import datetime
 from src.strategies.odte_breakout import ODTEBreakoutStrategy
 from src.strategies.earnings_straddle import EarningsStraddleStrategy
 from src.backtesting.backtest_engine import BacktestEngine
 from src.core.ibkr_connection import IBKRConnection
+
+# Inicializar colorama para colores en terminal
+colorama.init()
+
+# Crear un formateador colorido para los mensajes de error
+class ColoredFormatter(logging.Formatter):
+    def format(self, record):
+        # Formato base
+        log_message = super().format(record)
+        
+        # Aplicar colores según el nivel
+        if record.levelno >= logging.ERROR:
+            # Rojo para ERROR y CRITICAL
+            return f"{colorama.Fore.RED}{log_message}{colorama.Style.RESET_ALL}"
+        elif record.levelno >= logging.WARNING:
+            # Amarillo para WARNING
+            return f"{colorama.Fore.YELLOW}{log_message}{colorama.Style.RESET_ALL}"
+        elif record.levelno >= logging.INFO:
+            # Verde para INFO
+            return f"{colorama.Fore.GREEN}{log_message}{colorama.Style.RESET_ALL}"
+        else:
+            # Cyan para DEBUG
+            return f"{colorama.Fore.CYAN}{log_message}{colorama.Style.RESET_ALL}"
 
 # Configurar logging global
 def setup_logging():
@@ -25,14 +49,29 @@ def setup_logging():
     
     log_file = f"logs/strategy_runner_{datetime.now().strftime('%Y%m%d')}.log"
     
-    logging.basicConfig(
-        level=logging.INFO,
-        format='[%(asctime)s] %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
-    )
+    # Configuración básica de logging
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    
+    # Limpiar handlers existentes
+    for handler in root_logger.handlers[:]: 
+        root_logger.removeHandler(handler)
+    
+    # Crear handler para archivo (sin colores)
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter('[%(asctime)s] %(levelname)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    
+    # Crear handler para consola (con colores)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = ColoredFormatter('[%(asctime)s] %(levelname)s - %(message)s')
+    console_handler.setFormatter(console_formatter)
+    
+    # Agregar handlers
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
     
     return logging.getLogger('StrategyRunner')
 

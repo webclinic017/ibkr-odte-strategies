@@ -1,11 +1,36 @@
 from ..core.strategy_base import StrategyBase
 from ..core.options_utils import create_option_contract, get_atm_straddle
 from ..core.market_data import MarketData
-from ib_insync import MarketOrder
+from ib_insync import MarketOrder, Stock
 import json
 import os
 from datetime import datetime, timedelta
 import time
+import logging
+import colorama
+
+# Inicializar colorama para colores en terminal
+colorama.init()
+
+# Crear un formateador colorido para los mensajes de error
+class ColoredFormatter(logging.Formatter):
+    def format(self, record):
+        # Formato base
+        log_message = super().format(record)
+        
+        # Aplicar colores según el nivel
+        if record.levelno >= logging.ERROR:
+            # Rojo para ERROR y CRITICAL
+            return f"{colorama.Fore.RED}{log_message}{colorama.Style.RESET_ALL}"
+        elif record.levelno >= logging.WARNING:
+            # Amarillo para WARNING
+            return f"{colorama.Fore.YELLOW}{log_message}{colorama.Style.RESET_ALL}"
+        elif record.levelno >= logging.INFO:
+            # Verde para INFO
+            return f"{colorama.Fore.GREEN}{log_message}{colorama.Style.RESET_ALL}"
+        else:
+            # Cyan para DEBUG
+            return f"{colorama.Fore.CYAN}{log_message}{colorama.Style.RESET_ALL}"
 
 class EarningsStraddleStrategy(StrategyBase):
     """
