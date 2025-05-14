@@ -379,31 +379,74 @@ class EarningsStraddleStrategy(StrategyBase):
         self.logger.info(f"Ejecutando straddle para {ticker}")
         
         try:
-            self.ibkr.ensure_connection()
+            # Asegurar conexión con IBKR
+            if not self.ibkr.ensure_connection():
+                self.logger.error(f"No se pudo establecer conexión con IBKR para ejecutar straddle de {ticker}")
+                return None
+                
             ib = self.ibkr.ib
             
             # Obtener fecha de expiración cercana
             expiry_days = self.config["max_days_to_expiry"]
             expiry_date = (datetime.now() + timedelta(days=expiry_days)).strftime("%Y%m%d")
+            self.logger.info(f"Buscando expiración {expiry_date} para {ticker} (a {expiry_days} días)")
+            
+            # Verificar si el ticker tiene un precio válido
+            stock = Stock(ticker, 'SMART', 'USD')
+            try:
+                ib.qualifyContracts(stock)
+                stock_ticker = ib.reqMktData(stock, '', False, False)
+                ib.sleep(1)
+                
+                stock_price = stock_ticker.last or stock_ticker.close
+                if not stock_price or stock_price <= 0:
+                    self.logger.error(f"No se pudo obtener precio válido para {ticker}. Last: {stock_ticker.last}, Close: {stock_ticker.close}")
+                    return None
+                    
+                self.logger.info(f"Precio actual de {ticker}: ${stock_price}")
+            except Exception as e:
+                self.logger.error(f"Error al obtener precio de {ticker}: {e}")
+                return None
             
             # Obtener contratos para el straddle ATM
+            self.logger.info(f"Obteniendo contratos ATM para {ticker} con expiración {expiry_date}")
             call, put, current_price = get_atm_straddle(ib, ticker, expiry_date)
             
             if not call or not put:
                 self.logger.error(f"No se pudieron crear contratos para {ticker}")
-                return None
+                # Intentar con una fecha de expiración alternativa
+                alt_expiry_date = (datetime.now() + timedelta(days=expiry_days + 7)).strftime("%Y%m%d")
+                self.logger.info(f"Intentando con expiración alternativa {alt_expiry_date} para {ticker}")
+                
+                call, put, current_price = get_atm_straddle(ib, ticker, alt_expiry_date)
+                if not call or not put:
+                    self.logger.error(f"Tampoco se pudieron crear contratos con expiración alternativa para {ticker}")
+                    return None
+                
+            self.logger.info(f"Contratos creados exitosamente para {ticker}: CALL {call.strike} y PUT {put.strike}, expiración {call.lastTradeDateOrContractMonth}")
                 
             # Obtener precios de mercado
+            self.logger.info(f"Obteniendo precios de mercado para opciones de {ticker}")
             call_data = ib.reqMktData(call, "", False, False)
             put_data = ib.reqMktData(put, "", False, False)
             ib.sleep(2)
             
-            call_price = call_data.ask if call_data.ask else call_data.close
-            put_price = put_data.ask if put_data.ask else put_data.close
+            # Intentar obtener precios válidos
+            call_price = call_data.ask if call_data.ask else call_data.last
+            if not call_price:
+                call_price = call_data.close
+                
+            put_price = put_data.ask if put_data.ask else put_data.last
+            if not put_price:
+                put_price = put_data.close
             
             if not call_price or not put_price:
-                self.logger.error(f"No se pudieron obtener precios para {ticker}")
+                self.logger.error(f"No se pudieron obtener precios válidos para opciones de {ticker}.")
+                self.logger.error(f"CALL - Ask: {call_data.ask}, Last: {call_data.last}, Close: {call_data.close}")
+                self.logger.error(f"PUT - Ask: {put_data.ask}, Last: {put_data.last}, Close: {put_data.close}")
                 return None
+                
+            self.logger.info(f"Precios obtenidos para {ticker}: CALL ${call_price}, PUT ${put_price}")
                 
             # Calcular cantidad basada en capital máximo
             total_cost = call_price + put_price
@@ -411,16 +454,39 @@ class EarningsStraddleStrategy(StrategyBase):
             qty = int(max_capital / total_cost) if total_cost > 0 else 0
             
             if qty < 1:
-                self.logger.info(f"Capital insuficiente para {ticker}. Costo: ${total_cost:.2f}")
+                self.logger.info(f"Capital insuficiente para {ticker}. Costo total: ${total_cost:.2f} > Capital máximo: ${max_capital}")
                 return None
+                
+            self.logger.info(f"Ejecutando órdenes para {ticker}: {qty} contratos, costo total: ${(total_cost * qty):.2f}")
                 
             # Ejecutar órdenes de compra
             call_order = MarketOrder('BUY', qty)
             put_order = MarketOrder('BUY', qty)
             
-            call_trade = ib.placeOrder(call, call_order)
-            put_trade = ib.placeOrder(put, put_order)
-            ib.sleep(2)
+            # Colocar órdenes y verificar su estado
+            try:
+                call_trade = ib.placeOrder(call, call_order)
+                put_trade = ib.placeOrder(put, put_order)
+                ib.sleep(2)
+                
+                # Verificar estado de las órdenes
+                call_order_status = call_trade.orderStatus.status
+                put_order_status = put_trade.orderStatus.status
+                
+                self.logger.info(f"Estado de órdenes para {ticker} - CALL: {call_order_status}, PUT: {put_order_status}")
+                
+                # Verificar si alguna orden falló
+                if call_order_status in ['Cancelled', 'Inactive'] or put_order_status in ['Cancelled', 'Inactive']:
+                    self.logger.error(f"Al menos una orden fue rechazada para {ticker}")
+                    # Cancelar la otra orden si una falló
+                    if call_order_status not in ['Cancelled', 'Inactive']:
+                        ib.cancelOrder(call_trade.order)
+                    if put_order_status not in ['Cancelled', 'Inactive']:
+                        ib.cancelOrder(put_trade.order)
+                    return None
+            except Exception as e:
+                self.logger.error(f"Error al colocar órdenes para {ticker}: {e}")
+                return None
             
             # Registrar straddle
             straddle_data = {
@@ -438,7 +504,8 @@ class EarningsStraddleStrategy(StrategyBase):
                 "call_order_id": call_trade.order.orderId,
                 "put_order_id": put_trade.order.orderId,
                 "status": "OPEN",
-                "close_date": None
+                "close_date": None,
+                "score": opportunity.get("score", 0)
             }
             
             # Guardar datos
@@ -448,13 +515,16 @@ class EarningsStraddleStrategy(StrategyBase):
             # Notificar
             self.notify_straddle_opened(ticker, call.strike, qty, total_cost)
             
+            self.logger.info(f"Straddle ejecutado exitosamente para {ticker}")
             return {
                 "call_order_id": call_trade.order.orderId,
                 "put_order_id": put_trade.order.orderId
             }
             
         except Exception as e:
+            import traceback
             self.logger.error(f"Error al ejecutar straddle para {ticker}: {e}")
+            self.logger.debug(traceback.format_exc())
             return None
     
     def save_straddle(self, data):

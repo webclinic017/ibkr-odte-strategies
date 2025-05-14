@@ -415,10 +415,58 @@ class ODTEBreakoutStrategy(StrategyBase):
         if min_oi is None:
             min_oi = self.config.get("min_open_interest", 1000)
             
-        self.ibkr.ensure_connection()
+        self.logger.info(f"Validando contrato para {ticker} {signal_type} Strike {strike} Expiry {expiry}")
+        
+        # Asegurar conexión
+        if not self.ibkr.ensure_connection():
+            self.logger.error(f"No se pudo establecer conexión con IBKR para validar opción de {ticker}")
+            return False
+            
         ib = self.ibkr.ib
         
         try:
+            # Verificar si el ticker subyacente está disponible
+            stock = Stock(ticker, 'SMART', 'USD')
+            try:
+                ib.qualifyContracts(stock)
+            except Exception as e:
+                self.logger.error(f"No se pudo calificar stock para {ticker}: {e}")
+                return False
+                
+            # Verificar si la fecha de expiración está disponible
+            try:
+                params = ib.reqSecDefOptParams(ticker, '', 'STK', stock.conId)
+                
+                if not params:
+                    self.logger.error(f"No se pudieron obtener parámetros de opciones para {ticker}")
+                    return False
+                    
+                # Verificar expiraciones disponibles
+                available_expirations = set()
+                available_strikes = set()
+                
+                for param in params:
+                    available_expirations.update(param.expirations)
+                    available_strikes.update(param.strikes)
+                
+                self.logger.debug(f"Expiraciones disponibles para {ticker}: {sorted(list(available_expirations))[:5]}...")
+                self.logger.debug(f"Strikes disponibles para {ticker}: {sorted(list(available_strikes))[:5]}...")
+                
+                # Verificar si la expiración está disponible
+                if expiry not in available_expirations:
+                    self.logger.warning(f"Expiración {expiry} no disponible para {ticker}")
+                    return False
+                    
+                # Verificar si el strike está disponible
+                if strike not in available_strikes:
+                    closest_strike = min(available_strikes, key=lambda x: abs(x - strike))
+                    self.logger.warning(f"Strike {strike} no disponible para {ticker}. El más cercano es {closest_strike}")
+                    strike = closest_strike
+            except Exception as e:
+                self.logger.error(f"Error al verificar parámetros de opciones para {ticker}: {e}")
+                return False
+            
+            # Crear y validar el contrato
             contract = create_option_contract(
                 ib, 
                 ticker, 
@@ -428,38 +476,60 @@ class ODTEBreakoutStrategy(StrategyBase):
             )
             
             if not contract:
+                self.logger.error(f"No se pudo crear contrato para {ticker} {signal_type} Strike {strike}")
                 return False
                 
+            # Obtener datos de mercado
+            self.logger.debug(f"Solicitando datos de mercado para {ticker} {signal_type}")
             snapshot = ib.reqMktData(contract, "", False, False)
             ib.sleep(2)
             
+            # Verificar spread bid-ask
+            if hasattr(snapshot, 'bid') and hasattr(snapshot, 'ask') and snapshot.bid and snapshot.ask:
+                spread = snapshot.ask - snapshot.bid
+                spread_pct = spread / snapshot.ask if snapshot.ask > 0 else float('inf')
+                
+                if spread_pct > 0.20:  # Spread mayor al 20%
+                    self.logger.warning(f"{ticker} {signal_type} - Spread demasiado amplio: {spread_pct:.2%}")
+                
+            # Obtener detalles del contrato
+            self.logger.debug(f"Solicitando detalles de contrato para {ticker} {signal_type}")
             details = ib.reqContractDetails(contract)
             if not details:
-                self.logger.info(f"{ticker} {signal_type} - Sin detalles de contrato disponibles")
+                self.logger.warning(f"{ticker} {signal_type} - Sin detalles de contrato disponibles")
                 return False
                 
-            volume = snapshot.volume if snapshot.volume else 0
+            # Verificar volumen
+            volume = snapshot.volume if hasattr(snapshot, 'volume') and snapshot.volume else 0
             
             # En un entorno real, obtendríamos el open interest correctamente
             # Aquí usamos un valor aproximado
             oi = 0
             try:
-                oi = details[0].minTick if hasattr(details[0], "minTick") else 0
-            except:
+                if hasattr(details[0], "minTick"):
+                    oi = details[0].minTick
+            except Exception as e:
+                self.logger.debug(f"Error al obtener open interest aproximado: {e}")
                 oi = 0
                 
+            self.logger.info(f"{ticker} {signal_type} - Volumen: {volume}, Open Interest aprox: {oi}")
+                
+            # Validar criterios mínimos
             if volume < min_volume:
-                self.logger.info(f"{ticker} {signal_type} - Volumen insuficiente: {volume}")
+                self.logger.warning(f"{ticker} {signal_type} - Volumen insuficiente: {volume} < {min_volume}")
                 return False
                 
             if oi < min_oi:
-                self.logger.info(f"{ticker} {signal_type} - Open Interest insuficiente: {oi}")
+                self.logger.warning(f"{ticker} {signal_type} - Open Interest insuficiente: {oi} < {min_oi}")
                 return False
                 
+            self.logger.info(f"{ticker} {signal_type} Strike {strike} validado correctamente")
             return True
             
         except Exception as e:
+            import traceback
             self.logger.error(f"Error al validar opción {ticker} {signal_type}: {e}")
+            self.logger.debug(traceback.format_exc())
             return False
     
     def score_signal(self, ticker, signal_type, current_price, range_data, option_contract, market_data, trend_5m=None):

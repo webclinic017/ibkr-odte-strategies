@@ -110,10 +110,81 @@ def create_option_contract(ib, symbol, expiry, strike, right, exchange='SMART', 
     """
     contract = Option(symbol, expiry, strike, right, exchange, currency)
     try:
+        # Verificar disponibilidad de expiraciones
+        stock = Stock(symbol, exchange, currency)
+        ib.qualifyContracts(stock)
+        expiry_params = ib.reqSecDefOptParams(stock.symbol, '', stock.secType, stock.conId)
+        
+        # Log detallado de expiraciones disponibles
+        if expiry_params:
+            available_expirations = []
+            available_strikes = []
+            for param in expiry_params:
+                if param.exchange == exchange:
+                    available_expirations.extend(param.expirations)
+                    available_strikes.extend(param.strikes)
+                    
+            logger.debug(f"Expiraciones disponibles para {symbol}: {available_expirations}")
+            logger.debug(f"Strikes disponibles para {symbol}: {sorted(available_strikes)[:10]}...")
+            
+            # Verificar si la fecha solicitada está disponible
+            if expiry not in available_expirations:
+                closest_expiry = find_closest_expiry(expiry, available_expirations)
+                if closest_expiry:
+                    logger.warning(f"Expiración {expiry} no disponible para {symbol}. La más cercana es {closest_expiry}")
+                    if closest_expiry != expiry:
+                        expiry = closest_expiry
+                        contract.lastTradeDateOrContractMonth = expiry
+                        logger.info(f"Usando expiración alternativa: {expiry} para {symbol}")
+                else:
+                    logger.error(f"No hay expiraciones disponibles para {symbol}")
+                    return None
+                    
+            # Verificar si el strike solicitado está disponible o encontrar el más cercano
+            if available_strikes and strike not in available_strikes:
+                closest_strike = min(available_strikes, key=lambda x: abs(x - strike))
+                logger.warning(f"Strike {strike} no disponible para {symbol}. El más cercano es {closest_strike}")
+                strike = closest_strike
+                contract.strike = strike
+        else:
+            logger.error(f"No se pudieron obtener parámetros de opciones para {symbol}")
+            return None
+            
+        # Intentar calificar el contrato
         ib.qualifyContracts(contract)
+        logger.info(f"Contrato calificado: {symbol} {expiry} {strike} {right}")
         return contract
     except Exception as e:
+        import traceback
         logger.error(f"Error al calificar contrato: {symbol} {expiry} {strike} {right}: {e}")
+        logger.debug(traceback.format_exc())
+        return None
+
+def find_closest_expiry(target_expiry, available_expirations):
+    """Encuentra la fecha de expiración más cercana a la objetivo."""
+    if not available_expirations:
+        return None
+        
+    try:
+        # Convertir fechas a objetos datetime para comparación
+        target_date = datetime.strptime(target_expiry, '%Y%m%d')
+        
+        # Convertir todas las expiraciones disponibles a objetos datetime
+        expiry_dates = []
+        for exp in available_expirations:
+            try:
+                expiry_dates.append((datetime.strptime(exp, '%Y%m%d'), exp))
+            except ValueError:
+                continue
+                
+        if not expiry_dates:
+            return None
+            
+        # Encontrar la más cercana
+        closest = min(expiry_dates, key=lambda x: abs((x[0] - target_date).days))
+        return closest[1]  # Devolver el string original
+    except Exception as e:
+        logger.error(f"Error al buscar expiración cercana: {e}")
         return None
 
 def get_atm_straddle(ib, symbol, expiry, exchange='SMART', currency='USD'):
@@ -130,36 +201,89 @@ def get_atm_straddle(ib, symbol, expiry, exchange='SMART', currency='USD'):
     Returns:
         tuple: (call_contract, put_contract, current_price)
     """
-    # Obtener precio actual
-    stock = Stock(symbol, exchange, currency)
-    ib.qualifyContracts(stock)
+    logger.info(f"Buscando straddle ATM para {symbol} expiración {expiry}")
     
-    ticker = ib.reqMktData(stock, '', False, False)
-    ib.sleep(2)
-    
-    current_price = ticker.last if ticker.last else ticker.close
-    if not current_price:
-        logger.error(f"No se pudo obtener precio para {symbol}")
-        return None, None, None
+    try:
+        # Obtener precio actual
+        stock = Stock(symbol, exchange, currency)
+        logger.debug(f"Calificando contrato de stock para {symbol}")
+        ib.qualifyContracts(stock)
         
-    # Obtener cadena de opciones
-    chains = ib.reqSecDefOptParams(stock.symbol, '', stock.secType, stock.conId)
-    if not chains:
-        logger.error(f"No se encontraron opciones para {symbol}")
-        return None, None, None
+        ticker = ib.reqMktData(stock, '', False, False)
+        ib.sleep(2)
         
-    # Buscar strikes disponibles para la expiración
-    chain = next((c for c in chains if c.exchange == exchange and c.expirations), None)
-    if not chain or expiry not in chain.expirations:
-        logger.error(f"Expiración {expiry} no disponible para {symbol}")
-        return None, None, None
+        current_price = ticker.last if ticker.last else ticker.close
+        if not current_price:
+            logger.error(f"No se pudo obtener precio para {symbol}. last: {ticker.last}, close: {ticker.close}")
+            return None, None, None
+            
+        logger.debug(f"Precio actual de {symbol}: {current_price}")
         
-    # Encontrar strike ATM
-    strikes = chain.strikes
-    atm_strike = get_nearest_strike(current_price, strikes)
-    
-    # Crear contratos
-    call = create_option_contract(ib, symbol, expiry, atm_strike, 'C', exchange, currency)
-    put = create_option_contract(ib, symbol, expiry, atm_strike, 'P', exchange, currency)
-    
-    return call, put, current_price
+        # Obtener cadena de opciones
+        logger.debug(f"Solicitando parámetros de opciones para {symbol}")
+        chains = ib.reqSecDefOptParams(stock.symbol, '', stock.secType, stock.conId)
+        if not chains:
+            logger.error(f"No se encontraron opciones para {symbol}")
+            return None, None, None
+            
+        # Mostrar todas las expiraciones disponibles para diagnóstico
+        all_expirations = set()
+        all_exchanges = set()
+        for c in chains:
+            all_exchanges.add(c.exchange)
+            all_expirations.update(c.expirations)
+            
+        logger.debug(f"Exchanges disponibles para {symbol}: {all_exchanges}")
+        logger.debug(f"Expiraciones disponibles para {symbol}: {sorted(list(all_expirations))[:10]}...")
+        
+        # Buscar strikes disponibles para la expiración
+        target_chain = None
+        for c in chains:
+            if c.exchange == exchange and expiry in c.expirations and c.strikes:
+                target_chain = c
+                break
+                
+        if not target_chain:
+            # Intentar encontrar una expiración cercana si la exacta no está disponible
+            closest_expiry = find_closest_expiry(expiry, list(all_expirations))
+            if closest_expiry and closest_expiry != expiry:
+                logger.warning(f"Expiración {expiry} no disponible para {symbol}. Intentando con {closest_expiry}")
+                expiry = closest_expiry
+                
+                # Buscar de nuevo con la nueva expiración
+                for c in chains:
+                    if c.exchange == exchange and expiry in c.expirations and c.strikes:
+                        target_chain = c
+                        break
+            
+            if not target_chain:
+                logger.error(f"No se encontró cadena de opciones válida para {symbol} con expiración {expiry}")
+                return None, None, None
+        
+        # Encontrar strike ATM
+        strikes = sorted(target_chain.strikes)
+        if not strikes:
+            logger.error(f"No hay strikes disponibles para {symbol} con expiración {expiry}")
+            return None, None, None
+            
+        logger.debug(f"Strikes disponibles para {symbol}: {strikes[:10]}...")
+        
+        atm_strike = get_nearest_strike(current_price, strikes)
+        logger.info(f"Strike ATM seleccionado para {symbol}: {atm_strike} (precio actual: {current_price})")
+        
+        # Crear contratos
+        call = create_option_contract(ib, symbol, expiry, atm_strike, 'C', exchange, currency)
+        put = create_option_contract(ib, symbol, expiry, atm_strike, 'P', exchange, currency)
+        
+        if not call or not put:
+            logger.error(f"No se pudo crear al menos uno de los contratos para el straddle de {symbol}")
+            return None, None, None
+            
+        logger.info(f"Straddle creado exitosamente para {symbol}: {call.strike} {call.lastTradeDateOrContractMonth}")
+        return call, put, current_price
+        
+    except Exception as e:
+        import traceback
+        logger.error(f"Error al obtener straddle para {symbol}: {e}")
+        logger.debug(traceback.format_exc())
+        return None, None, None
