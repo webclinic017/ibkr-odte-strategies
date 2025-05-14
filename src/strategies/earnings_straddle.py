@@ -1,5 +1,6 @@
 from ..core.strategy_base import StrategyBase
 from ..core.options_utils import create_option_contract, get_atm_straddle
+from ..core.market_data import MarketData
 from ib_insync import MarketOrder
 import json
 import os
@@ -20,11 +21,13 @@ class EarningsStraddleStrategy(StrategyBase):
         self.default_config = {
             "tickers_whitelist": [
                 "TSLA", "NFLX", "NVDA", "AMD", "META", "AMZN", 
-                "BABA", "SHOP", "ROKU", "COIN", "MSFT", "AAPL", 
-                "GOOG", "GOOGL", "ADBE", "CRM", "PYPL"
+                "BABA", "SHOP", "ROKU", "COIN", "MSFT", "AAPL"
             ],
             "max_capital_per_trade": 500,
             "polygon_api_key": None,
+            "ibkr_host": "127.0.0.1",
+            "ibkr_port": 7497,
+            "ibkr_client_id": 2,
             "data_dir": "data/earnings",
             "scan_interval": 3600,  # segundos (1 hora)
             "auto_close_time": "14:35",  # Hora UTC para cierre automático
@@ -32,10 +35,20 @@ class EarningsStraddleStrategy(StrategyBase):
             "exit_days_after": 1,        # Salir 1 día después del reporte
             "min_iv_rank": 55,           # IV rank mínimo para entrada (percentil)
             "max_days_to_expiry": 5,     # Expiración máxima para opciones
+            "use_simulation": True,      # Usar datos simulados si la API no devuelve datos
         }
         
         # Combinar configuración personalizada con valores por defecto
         self.config = {**self.default_config, **(config or {})}
+        
+        # Asegurar que client_id sea un entero
+        if 'ibkr_client_id' in self.config:
+            self.config['ibkr_client_id'] = int(self.config['ibkr_client_id'])
+            
+        # Inicializar MarketData con la api key
+        self.market_data = MarketData(
+            polygon_api_key=self.config.get('polygon_api_key')
+        )
         
         # Datos internos
         self.earnings_calendar = {}  # Calendario de earnings próximos
@@ -80,16 +93,54 @@ class EarningsStraddleStrategy(StrategyBase):
             except Exception as e:
                 self.logger.error(f"Error al cargar straddle para {ticker}: {e}")
     
+    def get_simulated_earnings(self):
+        """Genera datos simulados de earnings para pruebas."""
+        self.logger.info("Usando datos simulados de earnings para pruebas")
+        
+        # Generar fechas de earnings para los próximos días
+        today = datetime.now().date()
+        earnings = {}
+        
+        # Día actual - para pruebas inmediatas
+        today_str = today.strftime('%Y-%m-%d')
+        earnings[today_str] = ["AAPL", "MSFT"]
+        
+        # Mañana
+        tomorrow = today + timedelta(days=1)
+        tomorrow_str = tomorrow.strftime('%Y-%m-%d')
+        earnings[tomorrow_str] = ["NVDA", "AMD"]
+        
+        # Próximos días
+        next_day = today + timedelta(days=2)
+        next_day_str = next_day.strftime('%Y-%m-%d')
+        earnings[next_day_str] = ["META", "AMZN"]
+        
+        # Día adicional
+        next_day2 = today + timedelta(days=3)
+        next_day2_str = next_day2.strftime('%Y-%m-%d')
+        earnings[next_day2_str] = ["TSLA", "NFLX"]
+        
+        self.logger.info(f"Datos simulados generados para {len(earnings)} fechas")
+        return earnings
+    
     def update_earnings_calendar(self):
         """Actualiza el calendario de earnings próximos."""
-        from ..core.market_data import MarketData
-        
-        market_data = MarketData(polygon_api_key=self.config.get("polygon_api_key"))
-        
+        # Verificar API key
+        if not self.config.get('polygon_api_key'):
+            self.logger.error("No se ha configurado Polygon API key. Verificar config.")
+            if self.config.get('use_simulation'):
+                # Usar datos simulados como fallback
+                self.earnings_calendar = self.get_simulated_earnings()
+            return
+            
         # Obtener datos para los próximos 7 días
-        earnings = market_data.get_earnings_calendar(days_ahead=7)
+        earnings = self.market_data.get_earnings_calendar(days_ahead=7)
         
-        if not earnings:
+        # Si no hay datos y está activada la simulación, usar datos simulados
+        if not earnings and self.config.get('use_simulation'):
+            self.logger.info("API no devolvió datos de earnings. Usando datos simulados.")
+            earnings = self.get_simulated_earnings()
+        elif not earnings:
             self.logger.warning("No se pudieron obtener datos de earnings")
             return
             
@@ -123,12 +174,22 @@ class EarningsStraddleStrategy(StrategyBase):
         today = datetime.now().date()
         target_date = (today + timedelta(days=self.config["entry_days_before"])).strftime("%Y-%m-%d")
         
+        self.logger.info(f"Buscando oportunidades para fecha objetivo: {target_date}")
+        self.logger.info(f"Fechas disponibles en calendario: {list(self.earnings_calendar.keys())}")
+        
         # Buscar earnings para la fecha objetivo
         earnings_tickers = self.earnings_calendar.get(target_date, [])
+        
+        if not earnings_tickers:
+            self.logger.info(f"No hay earnings programados para {target_date}")
+            return []
+            
+        self.logger.info(f"Tickers con earnings para {target_date}: {earnings_tickers}")
         
         for ticker in earnings_tickers:
             # Evitar duplicados si ya tenemos un straddle para este ticker
             if ticker in self.active_straddles:
+                self.logger.info(f"Ya existe un straddle activo para {ticker}")
                 continue
                 
             # Verificar volatilidad implícita
@@ -156,7 +217,9 @@ class EarningsStraddleStrategy(StrategyBase):
         # de volatilidad implícita y calcular el percentil actual
         # Aquí usamos un valor aleatorio para simular
         import random
-        return random.randint(40, 90)
+        rank = random.randint(40, 90)
+        self.logger.info(f"IV Rank simulado para {ticker}: {rank}%")
+        return rank
     
     def execute_trade(self, opportunity):
         """Ejecuta un straddle para la oportunidad detectada."""
@@ -368,15 +431,7 @@ class EarningsStraddleStrategy(StrategyBase):
     
     def is_market_open(self):
         """Verifica si el mercado está abierto."""
-        now = datetime.utcnow()
-        
-        # Verificar fin de semana
-        if now.weekday() >= 5:  # 5 = Sábado, 6 = Domingo
-            return False
-            
-        # Horario de mercado (9:30am - 4:00pm ET)
-        now_str = now.strftime('%H:%M')
-        return "13:30" <= now_str <= "20:00"  # Convertido a UTC
+        return self.market_data.is_market_open()
     
     def run(self):
         """Ejecuta el bucle principal de la estrategia."""

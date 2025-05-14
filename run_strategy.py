@@ -9,10 +9,14 @@ import os
 import json
 import signal
 import sys
+import threading
+import time
+import asyncio
 from datetime import datetime
 from src.strategies.odte_breakout import ODTEBreakoutStrategy
 from src.strategies.earnings_straddle import EarningsStraddleStrategy
 from src.backtesting.backtest_engine import BacktestEngine
+from src.core.ibkr_connection import IBKRConnection
 
 # Configurar logging global
 def setup_logging():
@@ -45,50 +49,116 @@ def load_config(config_path):
         logging.error(f"Error al cargar configuración: {e}")
         return {}
 
+# Variables globales para estrategias activas
+active_strategies = {}
+
 # Manejador de señales para cierre ordenado
 def signal_handler(signum, frame):
     """Maneja señales para un cierre ordenado de la aplicación."""
     logging.info("Señal de interrupción recibida. Cerrando estrategias...")
     
-    if 'active_strategy' in globals() and active_strategy:
-        active_strategy.stop()
-        
+    for name, strategy in active_strategies.items():
+        logging.info(f"Deteniendo estrategia: {name}")
+        strategy.stop()
+    
+    # Limpiar todas las conexiones IBKR
+    IBKRConnection.cleanup_all()
+    
     sys.exit(0)
 
-# Comando principal para ejecutar estrategias
-def run_strategy(args):
-    """Ejecuta una estrategia de trading."""
-    global active_strategy
+# Función para ejecutar una estrategia en su propio hilo
+def run_strategy_thread(strategy_name, config):
+    """Ejecuta una estrategia en un hilo separado."""
+    # Configurar el event loop para este hilo
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
-    logger = logging.getLogger('run_strategy')
-    logger.info(f"Iniciando estrategia: {args.strategy}")
-    
-    # Cargar configuración
-    config_path = args.config or f"config/{args.strategy.lower()}_config.json"
-    config = load_config(config_path)
-    
-    # Instanciar estrategia seleccionada
-    if args.strategy == 'odte_breakout':
-        strategy = ODTEBreakoutStrategy(config)
-    elif args.strategy == 'earnings_straddle':
-        strategy = EarningsStraddleStrategy(config)
-    else:
-        logger.error(f"Estrategia desconocida: {args.strategy}")
-        return
-    
-    # Iniciar y ejecutar estrategia
-    strategy.start()
-    active_strategy = strategy
+    logger = logging.getLogger(f'strategy_thread.{strategy_name}')
+    logger.info(f"Iniciando hilo para estrategia: {strategy_name}")
     
     try:
-        strategy.run()
-    except KeyboardInterrupt:
-        logger.info("Interrupción manual recibida. Deteniendo estrategia...")
+        # Asegurar que client_id es un entero
+        if 'ibkr_client_id' in config:
+            config['ibkr_client_id'] = int(config['ibkr_client_id'])
+        
+        # Instanciar estrategia seleccionada
+        if strategy_name == 'odte_breakout':
+            strategy = ODTEBreakoutStrategy(config)
+        elif strategy_name == 'earnings_straddle':
+            strategy = EarningsStraddleStrategy(config)
+        else:
+            logger.error(f"Estrategia desconocida: {strategy_name}")
+            return
+        
+        # Iniciar estrategia
+        strategy.start()
+        active_strategies[strategy_name] = strategy
+        
+        try:
+            strategy.run()
+        except Exception as e:
+            logger.error(f"Error en estrategia {strategy_name}: {e}")
+        finally:
+            strategy.stop()
+            if strategy_name in active_strategies:
+                del active_strategies[strategy_name]
     except Exception as e:
-        logger.error(f"Error al ejecutar estrategia: {e}")
+        logger.error(f"Error al inicializar estrategia {strategy_name}: {e}")
     finally:
-        strategy.stop()
-        active_strategy = None
+        loop.close()
+
+# Comando principal para ejecutar estrategias
+def run_strategies(args):
+    """Ejecuta una o varias estrategias de trading."""
+    logger = logging.getLogger('run_strategies')
+    
+    # Determinar qué estrategias ejecutar
+    strategies_to_run = []
+    
+    if args.strategy == 'all':
+        strategies_to_run = ['odte_breakout', 'earnings_straddle']
+        logger.info(f"Iniciando todas las estrategias disponibles: {strategies_to_run}")
+    else:
+        strategies_to_run = [args.strategy]
+        logger.info(f"Iniciando estrategia: {args.strategy}")
+    
+    # Crear hilos para cada estrategia
+    threads = []
+    
+    for strategy_name in strategies_to_run:
+        # Cargar configuración
+        config_path = args.config or f"config/{strategy_name.lower()}_config.json"
+        config = load_config(config_path)
+        
+        if not config:
+            logger.error(f"No se pudo cargar la configuración para {strategy_name}. Saltando...")
+            continue
+            
+        # Si es la estrategia earnings_straddle y se ejecuta junto con otra,
+        # asegurar que use un client_id diferente
+        if strategy_name == 'earnings_straddle' and len(strategies_to_run) > 1:
+            if 'ibkr_client_id' in config:
+                config['ibkr_client_id'] = 2  # Usar ID 2 para evitar conflictos
+        
+        # Crear y comenzar el hilo
+        thread = threading.Thread(
+            target=run_strategy_thread,
+            args=(strategy_name, config),
+            name=f"Thread-{strategy_name}"
+        )
+        thread.daemon = True  # Hilo daemon para que termine con el proceso principal
+        thread.start()
+        
+        threads.append(thread)
+        logger.info(f"Hilo iniciado para estrategia: {strategy_name}")
+    
+    # Mantener el proceso principal ejecutándose
+    try:
+        while any(t.is_alive() for t in threads):
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Interrupción manual recibida. Deteniendo estrategias...")
+        signal_handler(signal.SIGINT, None)
 
 # Comando para backtesting
 def run_backtest(args):
@@ -181,13 +251,30 @@ def init_config(args):
     logger.info("Archivos de configuración inicializados en el directorio 'config'")
     logger.info("Recuerda editar los archivos para configurar tus API keys y parámetros de trading")
 
+# Comando para listar estrategias activas
+def list_strategies(args):
+    """Lista las estrategias activas y su estado."""
+    logger = logging.getLogger('list_strategies')
+    
+    if not active_strategies:
+        logger.info("No hay estrategias activas en este momento")
+        return
+    
+    logger.info("Estrategias activas:")
+    for name, strategy in active_strategies.items():
+        status = "Activa" if strategy.active else "Inactiva"
+        client_id = "?" 
+        try:
+            if hasattr(strategy, 'ibkr') and hasattr(strategy.ibkr, 'client_id'):
+                client_id = strategy.ibkr.client_id
+        except:
+            pass
+        logger.info(f"- {name}: {status} (IBKR client_id: {client_id})")
+
 if __name__ == "__main__":
     # Configurar manejo de señales
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
-    # Variable global para la estrategia activa
-    active_strategy = None
     
     # Configurar logging
     logger = setup_logging()
@@ -198,8 +285,8 @@ if __name__ == "__main__":
     
     # Subcomando para ejecutar estrategia
     run_parser = subparsers.add_parser('run', help='Ejecutar una estrategia')
-    run_parser.add_argument('strategy', choices=['odte_breakout', 'earnings_straddle'], 
-                          help='Estrategia a ejecutar')
+    run_parser.add_argument('strategy', choices=['odte_breakout', 'earnings_straddle', 'all'], 
+                          help='Estrategia a ejecutar (usar "all" para todas)')
     run_parser.add_argument('-c', '--config', help='Ruta al archivo de configuración')
     
     # Subcomando para backtesting
@@ -218,15 +305,20 @@ if __name__ == "__main__":
     # Subcomando para inicializar configuración
     init_parser = subparsers.add_parser('init', help='Inicializar archivos de configuración')
     
+    # Subcomando para listar estrategias activas
+    list_parser = subparsers.add_parser('list', help='Listar estrategias activas')
+    
     # Parsear argumentos
     args = parser.parse_args()
     
     # Ejecutar comando solicitado
     if args.command == 'run':
-        run_strategy(args)
+        run_strategies(args)
     elif args.command == 'backtest':
         run_backtest(args)
     elif args.command == 'init':
         init_config(args)
+    elif args.command == 'list':
+        list_strategies(args)
     else:
         parser.print_help()

@@ -12,10 +12,27 @@ class MarketData:
         self.polygon_api_key = polygon_api_key
         self.cache_dir = cache_dir
         self.logger = logging.getLogger('MarketData')
-        self.ibkr = IBKRConnection()
+        self.ibkr = None  # Inicializamos a None y lo creamos cuando sea necesario
         
         # Crear directorio de caché si no existe
         os.makedirs(self.cache_dir, exist_ok=True)
+        
+        # Imprimir API key para depuración (solo los primeros y últimos caracteres)
+        if self.polygon_api_key:
+            api_key_len = len(self.polygon_api_key)
+            if api_key_len > 8:
+                visible_part = self.polygon_api_key[:4] + "..." + self.polygon_api_key[-4:]
+                self.logger.info(f"Polygon API key configurada: {visible_part}")
+            else:
+                self.logger.warning("Polygon API key parece ser demasiado corta")
+        else:
+            self.logger.warning("No se ha proporcionado Polygon API key")
+    
+    def get_ibkr_connection(self, client_id=1):
+        """Obtiene la conexión a IBKR, inicializándola si es necesario."""
+        if self.ibkr is None:
+            self.ibkr = IBKRConnection(client_id=client_id)
+        return self.ibkr
     
     def get_last_bar(self, symbol, timeframe='minute'):
         """
@@ -35,11 +52,17 @@ class MarketData:
         url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/prev?adjusted=true&apiKey={self.polygon_api_key}"
         
         try:
+            self.logger.debug(f"Solicitando datos de {symbol} a Polygon.io")
             r = requests.get(url)
             data = r.json()
             
+            # Para depuración
+            if "resultsCount" in data:
+                self.logger.debug(f"Recibidos {data['resultsCount']} resultados para {symbol}")
+            
             if "results" in data and data["results"]:
                 result = data["results"][0]
+                self.logger.debug(f"Datos recibidos para {symbol}")
                 return {
                     "open": result["o"],
                     "high": result["h"],
@@ -49,7 +72,10 @@ class MarketData:
                     "timestamp": result["t"]
                 }
             else:
-                self.logger.warning(f"No hay datos disponibles para {symbol}")
+                if "error" in data:
+                    self.logger.warning(f"Error en respuesta de Polygon para {symbol}: {data['error']}")
+                else:
+                    self.logger.warning(f"No hay datos disponibles para {symbol}")
                 return None
                 
         except Exception as e:
@@ -106,11 +132,18 @@ class MarketData:
         
         # Realizar solicitud a la API
         try:
+            self.logger.debug(f"Solicitando datos históricos de {symbol} a Polygon.io")
             r = requests.get(url)
             data = r.json()
             
+            if "resultsCount" in data:
+                self.logger.debug(f"Recibidos {data['resultsCount']} resultados históricos para {symbol}")
+            
             if "results" not in data or not data["results"]:
-                self.logger.warning(f"No hay datos históricos disponibles para {symbol}")
+                if "error" in data:
+                    self.logger.warning(f"Error en respuesta de Polygon para datos históricos de {symbol}: {data['error']}")
+                else:
+                    self.logger.warning(f"No hay datos históricos disponibles para {symbol}")
                 return None
                 
             # Convertir a DataFrame
@@ -156,15 +189,46 @@ class MarketData:
             
         url = f"https://api.polygon.io/v2/reference/financials/upcoming?apiKey={self.polygon_api_key}&limit=50"
         
+        # Para debugging, mostrar la URL completa que se está llamando
+        self.logger.info(f"Debug - URL de earnings: {url}")
+        
         try:
-            r = requests.get(url)
-            data = r.json()
+            # Mostrar información de la solicitud
+            self.logger.info(f"Solicitando calendario de earnings a Polygon.io")
             
+            # Realizar la solicitud HTTP
+            r = requests.get(url)
+            
+            # Mostrar código de respuesta y encabezados
+            self.logger.info(f"Debug - Código de respuesta: {r.status_code}")
+            self.logger.info(f"Debug - Headers de respuesta: {dict(r.headers)}")
+            
+            # Verificar el contenido de la respuesta
+            response_text = r.text
+            self.logger.info(f"Debug - Respuesta completa: {response_text[:1000]}...")  # Mostrar los primeros 1000 caracteres
+            
+            # Intentar parsear el JSON
+            try:
+                data = r.json()
+                self.logger.info(f"Debug - Claves en la respuesta JSON: {list(data.keys())}")
+            except Exception as json_err:
+                self.logger.error(f"Debug - Error al parsear JSON: {json_err}")
+                return {}
+            
+            # Procesar los resultados si existen
             if "results" not in data:
-                self.logger.warning("No hay datos de earnings disponibles")
+                self.logger.warning("No hay datos de earnings disponibles en la respuesta")
                 return {}
                 
             results = data["results"]
+            self.logger.info(f"Debug - Cantidad de resultados: {len(results)}")
+            
+            # Muestra una muestra de los primeros 2 resultados para depuración
+            if results and len(results) > 0:
+                self.logger.info(f"Debug - Muestra de resultado: {results[0]}")
+                if len(results) > 1:
+                    self.logger.info(f"Debug - Muestra de resultado 2: {results[1]}")
+            
             earnings_calendar = {}
             
             today = datetime.now().date()
@@ -173,6 +237,7 @@ class MarketData:
             for item in results:
                 if "reportingDate" in item:
                     date_str = item["reportingDate"]
+                    self.logger.debug(f"Debug - Fecha de reporte encontrada: {date_str}")
                     try:
                         report_date = datetime.strptime(date_str, '%Y-%m-%d').date()
                         if today <= report_date <= max_date:
@@ -180,13 +245,25 @@ class MarketData:
                             if date_str not in earnings_calendar:
                                 earnings_calendar[date_str] = []
                             earnings_calendar[date_str].append(ticker)
-                    except ValueError:
-                        continue
+                    except ValueError as ve:
+                        self.logger.error(f"Debug - Error al parsear fecha {date_str}: {ve}")
+                else:
+                    self.logger.debug(f"Debug - Elemento sin reportingDate: {item}")
+            
+            self.logger.info(f"Calendario de earnings obtenido: {len(earnings_calendar)} fechas")
+            if earnings_calendar:
+                for date, tickers in earnings_calendar.items():
+                    self.logger.info(f" - {date}: {len(tickers)} tickers")
             
             return earnings_calendar
             
+        except requests.exceptions.RequestException as req_e:
+            self.logger.error(f"Error de solicitud HTTP: {req_e}")
+            return {}
         except Exception as e:
             self.logger.error(f"Error al obtener calendario de earnings: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return {}
     
     def get_market_hours(self, date=None):
@@ -232,18 +309,23 @@ class MarketData:
         
         return market_open <= now.hour < market_close
         
-    def get_realtime_quote(self, symbol):
+    def get_realtime_quote(self, symbol, client_id=1):
         """
         Obtiene cotización en tiempo real desde IBKR
         
         Args:
             symbol (str): Símbolo del instrumento
+            client_id (int): ID de cliente para la conexión IBKR
             
         Returns:
             dict: Datos de cotización o None si hay error
         """
         from ib_insync import Stock
         
+        # Obtener conexión IBKR
+        if self.ibkr is None or self.ibkr.client_id != client_id:
+            self.ibkr = self.get_ibkr_connection(client_id)
+            
         self.ibkr.ensure_connection()
         
         contract = Stock(symbol, 'SMART', 'USD')

@@ -9,6 +9,7 @@ Un framework modular para desarrollar, probar y ejecutar estrategias de trading 
 ## Características
 
 - **Arquitectura modular**: Framework extensible para múltiples estrategias
+- **Ejecución concurrente**: Capacidad de ejecutar varias estrategias simultáneamente
 - **Conexión IBKR**: Interfaz simplificada con la API de Interactive Brokers
 - **Backtesting integrado**: Validación de estrategias con datos históricos
 - **Análisis de rendimiento**: Métricas detalladas y visualizaciones
@@ -36,9 +37,17 @@ python run_strategy.py init
 1. Abre TWS (Trader Workstation) o IB Gateway
 2. Activa API en Configuración > API > Habilitar API
 3. Conéctate con tu cuenta Paper Trading
-4. Ejecuta una estrategia:
+4. Ejecuta una o múltiples estrategias:
+
 ```bash
+# Ejecutar una estrategia específica
 python run_strategy.py run odte_breakout
+
+# Ejecutar todas las estrategias disponibles simultáneamente
+python run_strategy.py run all
+
+# Verificar estrategias activas
+python run_strategy.py list
 ```
 
 ### Backtesting
@@ -92,6 +101,16 @@ Abre posiciones straddle antes de reportes de ganancias y cierra después del mo
 ```bash
 python run_strategy.py run earnings_straddle
 ```
+
+### Ejecución Concurrente
+
+Para ejecutar todas las estrategias simultáneamente:
+
+```bash
+python run_strategy.py run all
+```
+
+Esto iniciará cada estrategia en su propio hilo, permitiendo monitorear todas las oportunidades al mismo tiempo. Cada estrategia utilizará su propia configuración y un ID de cliente diferente para evitar conflictos con la API de IBKR.
 
 ## Desarrollo de Nuevas Estrategias
 

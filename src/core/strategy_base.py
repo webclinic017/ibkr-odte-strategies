@@ -11,7 +11,18 @@ class StrategyBase(ABC):
         self.name = name
         self.config = config or {}
         self.logger = self._setup_logger()
-        self.ibkr = IBKRConnection()
+        
+        # Obtener client_id de la configuración o usar valor por defecto (1)
+        client_id = int(self.config.get('ibkr_client_id', 1))
+        self.logger.info(f"Usando client_id: {client_id} para estrategia {name}")
+        
+        # Inicializar conexión IBKR con el client_id correcto
+        self.ibkr = IBKRConnection(
+            host=self.config.get('ibkr_host', '127.0.0.1'),
+            port=int(self.config.get('ibkr_port', 7497)),
+            client_id=client_id
+        )
+        
         self.active = False
         self.trades = []
         
@@ -114,6 +125,7 @@ class StrategyBase(ABC):
             }
             
         winning_trades = sum(1 for t in self.trades if t.get('pnl', 0) > 0)
+        losing_trades = total_trades - winning_trades
         total_profit = sum(t.get('pnl', 0) for t in self.trades if t.get('pnl', 0) > 0)
         total_loss = sum(t.get('pnl', 0) for t in self.trades if t.get('pnl', 0) < 0)
         
@@ -123,7 +135,12 @@ class StrategyBase(ABC):
         
         return {
             "total_trades": total_trades,
+            "winning_trades": winning_trades,
+            "losing_trades": losing_trades,
             "win_rate": win_rate,
             "profit_factor": profit_factor,
+            "total_profit": total_profit,
+            "total_loss": total_loss,
+            "net_profit": total_profit + total_loss,
             "avg_profit": avg_profit
         }
