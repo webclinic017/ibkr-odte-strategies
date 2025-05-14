@@ -90,12 +90,26 @@ class IBKRConnection:
         
     def handle_ib_error(self, reqId, errorCode, errorString, contract):
         """Maneja errores de la API de IB."""
-        # Solo registrar errores relevantes (no los warnings)
-        if errorCode >= 100 and errorCode not in [2104, 2106, 2158]:  # Ignorar mensajes de conexión OK
+        # Ignorar mensajes de conexión OK y otros warnings no relevantes
+        ignore_codes = [2104, 2106, 2158, 2103, 2119, 2100]  # Códigos a ignorar (mensajes informativos)
+        
+        # Solo registrar errores relevantes
+        if errorCode >= 100 and errorCode not in ignore_codes:
             symbol = contract.symbol if contract else "Unknown"
-            self.logger.error(f"Error {errorCode}, reqId {reqId}: {errorString}{', contract: ' + str(contract) if contract else ''}")
+            strike = getattr(contract, 'strike', None) if contract else None
+            right = getattr(contract, 'right', None) if contract else None
+            expiry = getattr(contract, 'lastTradeDateOrContractMonth', None) if contract else None
             
-            # Manejar errores específicos de datos de mercado
+            # Formatear mensaje de error
+            error_msg = f"Error {errorCode}, reqId {reqId}: {errorString}"
+            if contract:
+                contract_info = f", contract: {contract}"
+                error_msg += contract_info
+            
+            # Registrar el error
+            self.logger.error(error_msg)
+            
+            # Manejar errores específicos
             if errorCode == 354:  # Datos de mercado no suscritos
                 self.logger.warning(f"No hay suscripción a datos en tiempo real para {symbol}. Intentando datos retrasados.")
                 if contract and symbol not in self.data_subscriptions:
@@ -103,10 +117,25 @@ class IBKRConnection:
                     self.data_subscriptions[symbol] = {'use_delayed': True}
             
             elif errorCode == 200:  # Sin seguridad definida
-                self.logger.error(f"El contrato para {symbol} no está bien definido")
+                if contract and hasattr(contract, 'secType') and contract.secType == 'OPT':
+                    self.logger.error(f"No existe definición para la opción: {symbol} {expiry} {strike} {right}")
+                    self.logger.warning(f"Comprueba que {symbol} tiene opciones disponibles con esta expiración y strike")
+                else:
+                    self.logger.error(f"El contrato para {symbol} no está bien definido")
                 
             elif errorCode in [10, 322, 502]:  # Errores de contrato/datos
                 self.logger.error(f"Problemas con el contrato para {symbol}: {errorString}")
+                
+            elif errorCode == 201:  # Order rejected
+                self.logger.error(f"Orden rechazada para {symbol}: {errorString}")
+                
+            elif errorCode == 202:  # Order cancelled
+                self.logger.warning(f"Orden cancelada para {symbol}: {errorString}")
+                
+            elif errorCode in [162, 420]:  # Problemas con permisos de datos
+                self.logger.warning(f"Falta permiso de datos para {symbol}: {errorString}. Intentando datos retrasados.")
+                if contract and symbol not in self.data_subscriptions:
+                    self.data_subscriptions[symbol] = {'use_delayed': True}
     
     def disconnect(self):
         """Cierra la conexión con IBKR."""

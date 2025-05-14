@@ -28,19 +28,16 @@ class ColoredFormatter(logging.Formatter):
         # Formato base
         log_message = super().format(record)
         
-        # Aplicar colores según el nivel
+        # Aplicar colores solo para ERROR y WARNING
         if record.levelno >= logging.ERROR:
             # Rojo para ERROR y CRITICAL
             return f"{colorama.Fore.RED}{log_message}{colorama.Style.RESET_ALL}"
         elif record.levelno >= logging.WARNING:
             # Amarillo para WARNING
             return f"{colorama.Fore.YELLOW}{log_message}{colorama.Style.RESET_ALL}"
-        elif record.levelno >= logging.INFO:
-            # Verde para INFO
-            return f"{colorama.Fore.GREEN}{log_message}{colorama.Style.RESET_ALL}"
         else:
-            # Cyan para DEBUG
-            return f"{colorama.Fore.CYAN}{log_message}{colorama.Style.RESET_ALL}"
+            # Sin color para INFO y DEBUG
+            return log_message
 
 # Configurar logging global
 def setup_logging():

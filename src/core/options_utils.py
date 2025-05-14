@@ -108,11 +108,32 @@ def create_option_contract(ib, symbol, expiry, strike, right, exchange='SMART', 
     Returns:
         Option: Contrato de opciones calificado
     """
-    contract = Option(symbol, expiry, strike, right, exchange, currency)
     try:
         # Verificar disponibilidad de expiraciones
         stock = Stock(symbol, exchange, currency)
         ib.qualifyContracts(stock)
+        
+        # Obtener el precio actual para asegurarnos de que el strike tiene sentido
+        try:
+            ticker = ib.reqMktData(stock, '', False, False)
+            ib.sleep(1)
+            current_price = ticker.last or ticker.close
+            if not current_price:
+                # Intentar con datos retrasados
+                ib.cancelMktData(stock)
+                ib.sleep(0.5)
+                ticker = ib.reqMktData(stock, '', True, False)  # True = datos retrasados
+                ib.sleep(1)
+                current_price = ticker.last or ticker.close
+                
+            if current_price:
+                logger.info(f"Precio actual de {symbol}: {current_price}")
+                # Si el strike está muy lejos del precio actual, podría ser un problema
+                if abs(strike - current_price) / current_price > 0.5:  # Más del 50% de diferencia
+                    logger.warning(f"Strike {strike} está demasiado lejos del precio actual {current_price} para {symbol}")
+        except Exception as e:
+            logger.warning(f"No se pudo obtener el precio actual para {symbol}: {e}")
+
         expiry_params = ib.reqSecDefOptParams(stock.symbol, '', stock.secType, stock.conId)
         
         # Log detallado de expiraciones disponibles
@@ -123,40 +144,78 @@ def create_option_contract(ib, symbol, expiry, strike, right, exchange='SMART', 
                 if param.exchange == exchange:
                     available_expirations.extend(param.expirations)
                     available_strikes.extend(param.strikes)
+            
+            # Ordenar para mostrar de forma más clara
+            available_expirations = sorted(available_expirations)
+            available_strikes = sorted(available_strikes)
                     
-            logger.debug(f"Expiraciones disponibles para {symbol}: {available_expirations}")
-            logger.debug(f"Strikes disponibles para {symbol}: {sorted(available_strikes)[:10]}...")
+            logger.debug(f"Expiraciones disponibles para {symbol}: {available_expirations[:5]}...")
+            if available_strikes:
+                logger.debug(f"Strikes disponibles para {symbol}: {available_strikes[:5]}...")
+                logger.debug(f"Rango de strikes: {min(available_strikes)} - {max(available_strikes)}")
             
             # Verificar si la fecha solicitada está disponible
+            if not available_expirations:
+                logger.error(f"No hay fechas de expiración disponibles para {symbol}")
+                return None
+                
             if expiry not in available_expirations:
                 closest_expiry = find_closest_expiry(expiry, available_expirations)
                 if closest_expiry:
                     logger.warning(f"Expiración {expiry} no disponible para {symbol}. La más cercana es {closest_expiry}")
-                    if closest_expiry != expiry:
-                        expiry = closest_expiry
-                        contract.lastTradeDateOrContractMonth = expiry
-                        logger.info(f"Usando expiración alternativa: {expiry} para {symbol}")
+                    expiry = closest_expiry
                 else:
-                    logger.error(f"No hay expiraciones disponibles para {symbol}")
+                    logger.error(f"No hay expiraciones cercanas disponibles para {symbol}")
                     return None
                     
             # Verificar si el strike solicitado está disponible o encontrar el más cercano
-            if available_strikes and strike not in available_strikes:
+            if not available_strikes:
+                logger.error(f"No hay strikes disponibles para {symbol} con expiración {expiry}")
+                return None
+                
+            if strike not in available_strikes:
                 closest_strike = min(available_strikes, key=lambda x: abs(x - strike))
                 logger.warning(f"Strike {strike} no disponible para {symbol}. El más cercano es {closest_strike}")
                 strike = closest_strike
-                contract.strike = strike
         else:
             logger.error(f"No se pudieron obtener parámetros de opciones para {symbol}")
             return None
             
+        # Crear contrato con los valores ajustados
+        contract = Option(symbol, expiry, strike, right, exchange, currency)
+            
         # Intentar calificar el contrato
-        ib.qualifyContracts(contract)
-        logger.info(f"Contrato calificado: {symbol} {expiry} {strike} {right}")
-        return contract
+        try:
+            ib.qualifyContracts(contract)
+            logger.info(f"Contrato calificado: {symbol} {expiry} {strike} {right}")
+            return contract
+        except Exception as qual_e:
+            no_security_def = "No security definition has been found" in str(qual_e)
+            if no_security_def:
+                logger.error(f"No existe definición de seguridad para {symbol} {expiry} {strike} {right}")
+                
+                # Intentar con otro strike cercano
+                if available_strikes and len(available_strikes) > 1:
+                    # Filtrar strikes cercanos al original
+                    nearby_strikes = [s for s in available_strikes if abs(s - strike) / strike < 0.2]  # Dentro del 20%
+                    if nearby_strikes:
+                        alt_strike = nearby_strikes[len(nearby_strikes) // 2]  # Tomar uno del medio
+                        logger.warning(f"Intentando con strike alternativo: {alt_strike} para {symbol}")
+                        alt_contract = Option(symbol, expiry, alt_strike, right, exchange, currency)
+                        try:
+                            ib.qualifyContracts(alt_contract)
+                            logger.info(f"Contrato alternativo calificado: {symbol} {expiry} {alt_strike} {right}")
+                            return alt_contract
+                        except:
+                            pass
+            
+            # Si llegamos aquí, no pudimos calificar ningún contrato
+            logger.error(f"Error al calificar contrato: {symbol} {expiry} {strike} {right}: {qual_e}")
+            return None
+            
     except Exception as e:
         import traceback
-        logger.error(f"Error al calificar contrato: {symbol} {expiry} {strike} {right}: {e}")
+        logger.error(f"Error al crear contrato: {symbol} {expiry} {strike} {right}: {e}")
         logger.debug(traceback.format_exc())
         return None
 
