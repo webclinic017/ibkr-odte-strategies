@@ -46,7 +46,29 @@ def get_option_expiry(days_to_expiry=0):
     Returns:
         str: Fecha de expiración en formato YYYYMMDD
     """
-    expiry_date = datetime.now() + timedelta(days=days_to_expiry)
+    from datetime import time
+    import pytz
+    
+    # Obtener la hora actual en ET
+    et_tz = pytz.timezone('US/Eastern')
+    now_et = datetime.now(et_tz)
+    
+    # Si es después de las 4 PM ET, considerar el siguiente día hábil para 0DTE
+    market_close = time(16, 0)  # 4:00 PM ET
+    
+    if days_to_expiry == 0 and now_et.time() > market_close:
+        # Después del cierre, usar el siguiente día hábil
+        next_day = now_et + timedelta(days=1)
+        # Si es viernes después del cierre, ir al lunes
+        while next_day.weekday() >= 5:  # 5=Sábado, 6=Domingo
+            next_day += timedelta(days=1)
+        expiry_date = next_day
+    else:
+        expiry_date = now_et + timedelta(days=days_to_expiry)
+        # Asegurar que no caiga en fin de semana
+        while expiry_date.weekday() >= 5:
+            expiry_date += timedelta(days=1)
+    
     return expiry_date.strftime('%Y%m%d')
 
 def filter_option_chain(chain, min_volume=10, min_open_interest=10, max_spread_pct=0.15):
@@ -115,16 +137,30 @@ def create_option_contract(ib, symbol, expiry, strike, right, exchange='SMART', 
         
         # Obtener el precio actual para asegurarnos de que el strike tiene sentido
         try:
+            ib.reqMarketDataType(3)  # Usar datos retrasados si real-time no está disponible
             ticker = ib.reqMktData(stock, '', False, False)
             ib.sleep(1)
-            current_price = ticker.last or ticker.close
-            if not current_price:
+            
+            # Obtener precio, asegurándose de que no sea nan
+            prices = [ticker.last, ticker.close, ticker.bid, ticker.ask]
+            valid_prices = [p for p in prices if p is not None and p > 0 and not (isinstance(p, float) and (p != p or p == float('inf') or p == float('-inf')))]
+            
+            if valid_prices:
+                current_price = valid_prices[0]
+            else:
                 # Intentar con datos retrasados
                 ib.cancelMktData(stock)
                 ib.sleep(0.5)
                 ticker = ib.reqMktData(stock, '', True, False)  # True = datos retrasados
                 ib.sleep(1)
-                current_price = ticker.last or ticker.close
+                
+                delayed_prices = [ticker.last, ticker.close, ticker.bid, ticker.ask]
+                valid_delayed_prices = [p for p in delayed_prices if p is not None and p > 0 and not (isinstance(p, float) and (p != p or p == float('inf') or p == float('-inf')))]
+                
+                if valid_delayed_prices:
+                    current_price = valid_delayed_prices[0]
+                else:
+                    current_price = None
                 
             if current_price:
                 logger.info(f"Precio actual de {symbol}: {current_price}")
@@ -182,12 +218,28 @@ def create_option_contract(ib, symbol, expiry, strike, right, exchange='SMART', 
             return None
             
         # Crear contrato con los valores ajustados
-        contract = Option(symbol, expiry, strike, right, exchange, currency)
+        contract = Option(symbol, expiry, strike, right, multiplier='100', exchange=exchange, currency=currency)
             
         # Intentar calificar el contrato
         try:
             ib.qualifyContracts(contract)
             logger.info(f"Contrato calificado: {symbol} {expiry} {strike} {right}")
+            
+            # Configurar para usar datos retrasados si se detectan problemas de suscripción
+            has_subscription_error = False
+            if hasattr(ib, '_events'):
+                for event in ib._events.get('errorEvent', []):
+                    if '10091' in str(event) or '10089' in str(event):
+                        has_subscription_error = True
+                        break
+                        
+            if has_subscription_error:
+                logger.warning(f"Detectado problema de suscripción de datos para {symbol}. Configurando para usar datos retrasados.")
+                try:
+                    ib.reqMarketDataType(3)  # 3 = Usar delayed data cuando real-time no está disponible
+                except Exception as e:
+                    logger.warning(f"No se pudo configurar datos retrasados: {e}")
+                    
             return contract
         except Exception as qual_e:
             no_security_def = "No security definition has been found" in str(qual_e)
@@ -201,7 +253,7 @@ def create_option_contract(ib, symbol, expiry, strike, right, exchange='SMART', 
                     if nearby_strikes:
                         alt_strike = nearby_strikes[len(nearby_strikes) // 2]  # Tomar uno del medio
                         logger.warning(f"Intentando con strike alternativo: {alt_strike} para {symbol}")
-                        alt_contract = Option(symbol, expiry, alt_strike, right, exchange, currency)
+                        alt_contract = Option(symbol, expiry, alt_strike, right, multiplier='100', exchange=exchange, currency=currency)
                         try:
                             ib.qualifyContracts(alt_contract)
                             logger.info(f"Contrato alternativo calificado: {symbol} {expiry} {alt_strike} {right}")
@@ -273,11 +325,17 @@ def get_atm_straddle(ib, symbol, expiry, exchange='SMART', currency='USD'):
         # Intento 1: Usar reqMktData con datos en tiempo real
         try:
             logger.info(f"Solicitando precio en tiempo real para {symbol}")
+            # Primero configurar para datos retrasados si es necesario
+            ib.reqMarketDataType(3)  # 3 = usar datos retrasados cuando real-time no esté disponible
             ticker = ib.reqMktData(stock, '', False, False)
             ib.sleep(2)
             
-            current_price = ticker.last or ticker.close or ticker.bid or ticker.ask or ticker.high or ticker.low
-            if current_price:
+            # Obtener precio, asegurándose de que no sea nan
+            prices = [ticker.last, ticker.close, ticker.bid, ticker.ask, ticker.high, ticker.low]
+            valid_prices = [p for p in prices if p is not None and p > 0 and not (isinstance(p, float) and (p != p or p == float('inf') or p == float('-inf')))]
+            
+            if valid_prices:
+                current_price = valid_prices[0]
                 logger.info(f"Precio en tiempo real de {symbol}: {current_price}")
         except Exception as e:
             logger.warning(f"Error al obtener datos en tiempo real para {symbol}: {e}")
@@ -297,8 +355,12 @@ def get_atm_straddle(ib, symbol, expiry, exchange='SMART', currency='USD'):
                 delayed_ticker = ib.reqMktData(stock, '233', True, False)
                 ib.sleep(3)
                 
-                current_price = delayed_ticker.last or delayed_ticker.close or delayed_ticker.bid or delayed_ticker.ask
-                if current_price:
+                # Obtener precio, asegurándose de que no sea nan
+                delayed_prices = [delayed_ticker.last, delayed_ticker.close, delayed_ticker.bid, delayed_ticker.ask]
+                valid_delayed_prices = [p for p in delayed_prices if p is not None and p > 0 and not (isinstance(p, float) and (p != p or p == float('inf') or p == float('-inf')))]
+                
+                if valid_delayed_prices:
+                    current_price = valid_delayed_prices[0]
                     logger.info(f"Precio retrasado de {symbol}: {current_price}")
             except Exception as delayed_e:
                 logger.warning(f"Error al obtener datos retrasados para {symbol}: {delayed_e}")
@@ -326,7 +388,7 @@ def get_atm_straddle(ib, symbol, expiry, exchange='SMART', currency='USD'):
             except Exception as hist_e:
                 logger.warning(f"Error al obtener datos históricos para {symbol}: {hist_e}")
         
-        # Intento 4: Obtener precio de ticker predefinido (hardcoded para tickers comunes)
+        # Intento 4: Obtener precio de ticker predefinido (hardcoded para tickers comunes y agregar RBLX)
         if not current_price:
             default_prices = {
                 "SPY": 580.0,
@@ -341,7 +403,13 @@ def get_atm_straddle(ib, symbol, expiry, exchange='SMART', currency='USD'):
                 "AMD": 160.0,
                 "NFLX": 640.0,
                 "COIN": 250.0,
-                "ROKU": 65.0
+                "ROKU": 65.0,
+                "RBLX": 75.0,
+                "SNAP": 15.0,
+                "UBER": 75.0,
+                "DIS": 110.0,
+                "V": 285.0,
+                "JPM": 205.0
             }
             
             if symbol in default_prices:

@@ -82,6 +82,14 @@ class IBKRConnection:
                 # Configurar el manejo de errores para datos de mercado
                 self.ib.errorEvent += self.handle_ib_error
                 
+                # Configurar para usar datos retrasados si no hay suscripción
+                if self.use_delayed_data:
+                    try:
+                        self.ib.reqMarketDataType(3)  # 3 = Usar delayed data cuando real-time no está disponible
+                        self.logger.info("Configurado para usar datos retrasados cuando sea necesario")
+                    except Exception as e:
+                        self.logger.warning(f"No se pudo configurar datos retrasados: {e}")
+                
                 return True
             except Exception as e:
                 self.logger.error(f"Error de conexión a IBKR con client_id {self.client_id}: {e}")
@@ -106,8 +114,11 @@ class IBKRConnection:
                 contract_info = f", contract: {contract}"
                 error_msg += contract_info
             
-            # Registrar el error
-            self.logger.error(error_msg)
+            # Registrar el error con nivel apropiado
+            if errorCode == 10167:
+                self.logger.info(error_msg)
+            else:
+                self.logger.error(error_msg)
             
             # Manejar errores específicos
             if errorCode == 354:  # Datos de mercado no suscritos
@@ -134,6 +145,31 @@ class IBKRConnection:
                 
             elif errorCode in [162, 420]:  # Problemas con permisos de datos
                 self.logger.warning(f"Falta permiso de datos para {symbol}: {errorString}. Intentando datos retrasados.")
+                if contract and symbol not in self.data_subscriptions:
+                    self.data_subscriptions[symbol] = {'use_delayed': True}
+                    
+            elif errorCode == 10089:  # Falta de suscripción a datos de mercado
+                self.logger.warning(f"Error 10089: Sin suscripción para datos en tiempo real para {symbol}. Cambiando a datos retrasados.")
+                if contract and symbol not in self.data_subscriptions:
+                    self.data_subscriptions[symbol] = {'use_delayed': True}
+                # Automáticamente solicitar datos retrasados para este símbolo
+                try:
+                    self.ib.reqMarketDataType(3)  # 3 = Delayed data si 1 no está disponible
+                except Exception as e:
+                    self.logger.error(f"Error al cambiar a datos retrasados: {e}")
+                    
+            elif errorCode == 10091:  # Falta de suscripción a datos de mercado requeridos
+                self.logger.warning(f"Error 10091: Suscripción adicional requerida para {symbol}. Cambiando a datos retrasados.")
+                if contract and symbol not in self.data_subscriptions:
+                    self.data_subscriptions[symbol] = {'use_delayed': True}
+                # Automáticamente solicitar datos retrasados para este símbolo
+                try:
+                    self.ib.reqMarketDataType(3)  # 3 = Delayed data si 1 no está disponible
+                except Exception as e:
+                    self.logger.error(f"Error al cambiar a datos retrasados: {e}")
+                    
+            elif errorCode == 10167:  # Datos de mercado no suscritos, mostrando datos retrasados
+                self.logger.info(f"Error 10167: Usando datos retrasados para {symbol}.")
                 if contract and symbol not in self.data_subscriptions:
                     self.data_subscriptions[symbol] = {'use_delayed': True}
     
