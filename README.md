@@ -1,15 +1,15 @@
 # ODTE IBKR Trading System
 
-Automated trading system for executing 0DTE options and earnings straddle strategies using Interactive Brokers API.
+Modular trading system for executing automated options strategies using Interactive Brokers API.
 
 ## Overview
 
-This system includes two main trading bots:
+This system implements multiple trading strategies through a unified framework:
 
-1. **ODTE Breakout Bot** - Trades 0-Day-To-Expiration (0DTE) options based on breakout signals
-2. **Earnings Straddle Bot** - Executes straddle positions around company earnings announcements
+1. **ODTE Breakout Strategy** - Trades 0-Day-To-Expiration (0DTE) options based on breakout signals
+2. **Earnings Straddle Strategy** - Executes straddle positions around company earnings announcements
 
-Both bots are designed to work with smaller accounts (optimized for $5K) and include risk management capabilities.
+Both strategies are designed to work with smaller accounts and include comprehensive risk management capabilities.
 
 ## Features
 
@@ -32,25 +32,59 @@ Both bots are designed to work with smaller accounts (optimized for $5K) and inc
 ## Setup
 
 1. Clone this repository
-2. Install dependencies:
+2. Run the setup script (creates virtual environment and config files):
+   ```bash
+   chmod +x setup.sh
+   ./setup.sh
    ```
+   Or manually:
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
    pip install -r requirements.txt
    ```
-3. Configure settings in `config/odte_breakout_config.json` and `config/earnings_straddle_config.json`
+3. Configure your settings:
+   - Edit `config/odte_breakout_config.json` for ODTE strategy
+   - Edit `config/earnings_straddle_config.json` for earnings strategy
+   - Add your API keys and adjust trading parameters
 4. Launch TWS or IB Gateway and ensure API connections are enabled
 
-## Running the Bots
+## Running the Strategies
 
-### ODTE Breakout Bot
+### Initialize Configuration
 
 ```bash
-python odte_ibkr_full_auto.py --paper-trading
+python run_strategy.py init
 ```
 
-### Earnings Straddle Bot
+### Run a Single Strategy
 
 ```bash
-python straddle_earnings_bot.py --paper-trading
+# For ODTE Breakout
+python run_strategy.py run odte_breakout
+
+# For Earnings Straddle
+python run_strategy.py run earnings_straddle
+```
+
+### Run All Strategies
+
+```bash
+python run_strategy.py run all
+```
+
+### Additional Commands
+
+```bash
+# Run backtesting
+python run_strategy.py backtest odte_breakout -s 2024-01-01 -e 2024-12-31
+
+# List active strategies
+python run_strategy.py list
+
+# Close positions
+python run_strategy.py close all
+python run_strategy.py close odte_breakout
 ```
 
 ## Configuration
@@ -84,30 +118,51 @@ The system implements several risk-management features:
 - Pre-market and after-hours handling
 - Market data verification
 
-## Original Framework
+## Architecture
 
-This project is built on a modular framework for developing, testing, and executing 0DTE trading strategies using Interactive Brokers API. The framework includes:
+The system follows a modular architecture that separates concerns:
 
-- **Modular architecture**: Extensible framework for multiple strategies
-- **Concurrent execution**: Ability to run multiple strategies simultaneously
-- **IBKR connection**: Simplified interface with Interactive Brokers API
-- **Backtesting**: Strategy validation with historical data
-- **Performance analysis**: Detailed metrics and visualizations
+- **Strategy Framework**: Base classes and interfaces for strategy implementation
+- **Core Components**: Shared utilities for IBKR connection, market data, and options handling
+- **Strategy Implementations**: Individual strategy logic separated from infrastructure
+- **Unified Runner**: Single entry point for all strategies with common configuration
 
-## Estructura del Proyecto
+### Key Features
+
+- **Concurrent Execution**: Run multiple strategies simultaneously
+- **IBKR Integration**: Robust connection management with automatic reconnection
+- **Risk Management**: Built-in position sizing and stop-loss management
+- **Backtesting**: Historical data analysis for strategy validation
+- **Flexible Configuration**: JSON-based configuration for easy parameter tuning
+
+## Project Structure
 
 ```
 odte-ibkr-strats/
-├── config/                   # Configuration files
+├── config/                   # Strategy configuration files
+├── data/                     # Trading data and logs
+├── logs/                     # System logs
 ├── src/
 │   ├── backtesting/          # Backtesting engine
-│   ├── core/                 # Core components
-│   ├── strategies/           # Implemented strategies
+│   ├── core/                 # Core infrastructure
+│   │   ├── ibkr_connection.py   # IBKR API wrapper
+│   │   ├── market_data.py       # Market data utilities
+│   │   ├── options_utils.py     # Options calculations
+│   │   └── strategy_base.py     # Base strategy class
+│   ├── strategies/           # Strategy implementations
+│   │   ├── odte_breakout.py     # ODTE breakout strategy
+│   │   └── earnings_straddle.py # Earnings straddle strategy
 │   └── utils/                # General utilities
-├── odte_ibkr_full_auto.py    # ODTE Breakout standalone bot
-├── straddle_earnings_bot.py  # Earnings Straddle standalone bot 
-├── run_strategy.py           # Main script to run strategies
+├── run_strategy.py           # Main entry point
+├── requirements.txt          # Python dependencies
+└── setup.sh                  # Setup script
 ```
+
+### Deprecated Files
+
+The following standalone scripts are deprecated in favor of the modular architecture:
+- `odte_ibkr_full_auto.py` - Use `run_strategy.py run odte_breakout` instead
+- `straddle_earnings_bot.py` - Use `run_strategy.py run earnings_straddle` instead
 
 ## License
 
